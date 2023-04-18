@@ -84,6 +84,8 @@ struct SQFuncState
     SQSharedState *_sharedstate;
     sqvector<SQFuncState*> _childstates;
     SQInteger GetConstant(const SQObject &cons);
+
+    static void reset();
 private:
     CompilerErrorFunc _errfunc;
     void *_errtarget;

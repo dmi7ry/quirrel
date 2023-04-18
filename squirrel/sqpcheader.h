@@ -17,4 +17,5 @@
 #include "sqobject.h"
 #include "sqstate.h"
 
+#define _DEBUG_DUMP 1
 #endif //_SQPCHEADER_H_

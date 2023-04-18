@@ -239,14 +239,23 @@ SQInteger SQFuncState::AllocStackPos()
     }
     return npos;
 }
+static int count = 0;
+
+void SQFuncState::reset() { count = 0; }
 
 SQInteger SQFuncState::PushTarget(SQInteger n)
 {
+    if (count == 37) {
+        printf("");
+    }
+
     if(n!=-1){
         _targetstack.push_back(n);
+        printf("[%d] Push target #%d\n", ++count, n);
         return n;
     }
     n=AllocStackPos();
+    printf("[%d] Push target #%d\n", ++count, n);
     _targetstack.push_back(n);
     return n;
 }
@@ -260,10 +269,16 @@ SQInteger SQFuncState::TopTarget(){
 }
 SQInteger SQFuncState::PopTarget()
 {
+
+    if (count == 37) {
+        printf("");
+    }
     SQUnsignedInteger npos=_targetstack.back();
+    printf("[%d] Pop target #%d\n", ++count, npos);
     assert(npos < _vlocals.size());
     SQLocalVarInfo &t = _vlocals[npos];
     if(sq_type(t._name)==OT_NULL){
+        printf("[%d]     Pop VLOCAL #%d\n", count, t._pos);
         _vlocals.pop_back();
     }
     _targetstack.pop_back();
@@ -416,6 +431,10 @@ void SQFuncState::DiscardTarget()
 
 void SQFuncState::AddInstruction(SQInstruction &i)
 {
+    if (i.op == _OP_CLOSE) {
+        printf("BP 2\n");
+    }
+
     SQInteger size = _instructions.size();
     if(size > 0 && _optimization){ //simple optimizer
         SQInstruction &pi = _instructions[size-1];//previous instruction
