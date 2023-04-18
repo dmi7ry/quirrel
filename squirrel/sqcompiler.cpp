@@ -155,7 +155,7 @@ public:
         _out << ")";
 
     }
-    virtual void visitId(Id *id) { _out << _stringval(id->_id); }
+    virtual void visitId(Id *id) { _out << id->id(); }
 
     virtual void visitGetFieldExpr(GetFieldExpr *expr) { 
         expr->receiver()->visit(*this);
@@ -679,12 +679,17 @@ public:
 
     void visitId(Id *id) override;
 
+    SQObject selectLiteral(LiteralExpr *lit);
+
 
 };
 
 class SQCompiler
 {
 public:
+
+    const SQChar *_rawsourcename;
+
     SQCompiler(SQVM *v, SQLEXREADFUNC rg, SQUserPointer up, const HSQOBJECT *bindings, const SQChar* sourcename, bool raiseerror, bool lineinfo) :
       _lex(_ss(v)),
       _scopedconsts(_ss(v)->_alloc_ctx),
@@ -692,6 +697,7 @@ public:
     {
         _vm=v;
         _lex.Init(_ss(v), rg, up,ThrowError,this);
+        _rawsourcename = sourcename;
         _sourcename = SQString::Create(_ss(v), sourcename);
         _lineinfo = lineinfo;_raiseerror = raiseerror;
         _scope.outers = 0;
@@ -844,7 +850,7 @@ public:
     }
 
 
-    SQObject Expect(SQInteger tok)
+    SQObject Expect(SQInteger tok, Expr **r = NULL)
     {
 
         if(_token != tok) {
@@ -881,15 +887,23 @@ public:
         {
         case TK_IDENTIFIER:
             ret = _fs->CreateString(_lex._svalue);
+            assert(r);
+            *r = new Id(_lex._svalue);
             break;
         case TK_STRING_LITERAL:
             ret = _fs->CreateString(_lex._svalue,_lex._longstr.size()-1);
+            assert(r);
+            *r = new LiteralExpr(_lex._svalue);
             break;
         case TK_INTEGER:
             ret = SQObjectPtr(_lex._nvalue);
+            assert(r);
+            *r = new LiteralExpr(_lex._nvalue);
             break;
         case TK_FLOAT:
             ret = SQObjectPtr(_lex._fvalue);
+            assert(r);
+            *r = new LiteralExpr(_lex._fvalue);
             break;
         }
         Lex();
@@ -1535,12 +1549,13 @@ public:
                 bool canBeLiteral = _es.etype!=BASE && _token == _SC('.');//todo: we can support def delegate and nullable also.
                 Lex();
 
-                SQObjectPtr constant = Expect(TK_IDENTIFIER);
+                Id *id = NULL;
+                SQObjectPtr constant = Expect(TK_IDENTIFIER, (Expr **)&id);
                 if (CanBeDefaultDelegate(constant))
                     flags |= OP_GET_FLAG_ALLOW_DEF_DELEGATE;
                 _es.literal_field = canBeLiteral && !(flags & (OP_GET_FLAG_NO_ERROR|OP_GET_FLAG_ALLOW_DEF_DELEGATE));//todo: we can support def delegate and nullable also.
 
-                e = new GetFieldExpr(e, _stringval(constant), nextIsNullable);
+                e = new GetFieldExpr(e, id->id(), nextIsNullable);
 
                 SQInteger constantI = _fs->GetConstant(constant);
                 _fs->AddInstruction(_OP_LOAD, _fs->PushTarget(), constantI);
@@ -1730,12 +1745,10 @@ public:
                 SQObject constant;
 
                 switch(_token) {
-                    case TK_IDENTIFIER:  id = _fs->CreateString(_lex._svalue); break;
-                    case TK_THIS:        id = _fs->CreateString(_SC("this"),4); break;
-                    case TK_CONSTRUCTOR: id = _fs->CreateString(_SC("constructor"), 11);  break;
+                    case TK_IDENTIFIER:  id = _fs->CreateString(_lex._svalue); r = new Id(_lex._svalue); break;
+                    case TK_THIS:        id = _fs->CreateString(_SC("this"),4); r = new Id(_SC("this")); break;
+                    case TK_CONSTRUCTOR: id = _fs->CreateString(_SC("constructor"), 11); r = new Id(_SC("constructor")); break;
                 }
-
-                r = new Id(id);
 
                 if (_stringval(id) == _stringval(_fs->_name)) {
                     Error(_SC("Variable name %s conflicts with function name"), _stringval(id));
@@ -2059,13 +2072,15 @@ public:
             case TK_CONSTRUCTOR:{
                 SQInteger tk = _token;
                 Lex();
-                SQObject id = tk == TK_FUNCTION ? Expect(TK_IDENTIFIER) : _fs->CreateString(_SC("constructor"));
+                Id *funcName = NULL;
+                SQObject id = tk == TK_FUNCTION ? Expect(TK_IDENTIFIER, (Expr **)&funcName) : _fs->CreateString(_SC("constructor"));
                 SQChar *lit = _stringval(id);
+                if (!funcName) { funcName = new Id(_SC("constructor")); }
                 LiteralExpr *key = new LiteralExpr(lit);
                 CheckMemberUniqueness(*memberConstantKeys, id);
                 Expect(_SC('('));
                 _fs->AddInstruction(_OP_LOAD, _fs->PushTarget(), _fs->GetConstant(id));
-                FunctionDecl *f = CreateFunction(id, false, tk == TK_CONSTRUCTOR);
+                FunctionDecl *f = CreateFunction(funcName, false, tk == TK_CONSTRUCTOR);
                 _fs->AddInstruction(_OP_CLOSURE, _fs->PushTarget(), _fs->_functions.size() - 1, 0);
                 decl->addMember(key, f, isstatic);
             }
@@ -2104,7 +2119,8 @@ public:
                     break;
                 }  //-V796
             default : {
-                SQObject id = Expect(TK_IDENTIFIER);
+                Id *idExpr = NULL;
+                SQObject id = Expect(TK_IDENTIFIER, (Expr **)&idExpr);
                 SQChar *lit = _stringval(id);
                 LiteralExpr *key = new LiteralExpr(lit);
                 CheckMemberUniqueness(*memberConstantKeys, id);
@@ -2116,7 +2132,7 @@ public:
                     SQObject constant;
                     SQInteger pos = -1;
                     bool assignable = false;
-                    Id *idExpr = new Id(id);
+                    //Id *idExpr = new Id(id);
                     decl->addMember(key, idExpr, isstatic);
                     if((pos = _fs->GetLocalVariable(id, assignable)) != -1)
                         _fs->PushTarget(pos);
@@ -2171,25 +2187,27 @@ public:
         Lex();
         if( _token == TK_FUNCTION) {
             Lex();
-            varname = Expect(TK_IDENTIFIER);
+            Id *idExpr = NULL;
+            varname = Expect(TK_IDENTIFIER, (Expr **)&idExpr);
             CheckDuplicateLocalIdentifier(varname, _SC("Function"), false);
             Expect(_SC('('));
-            FunctionDecl *f = CreateFunction(varname,false);
+            FunctionDecl *f = CreateFunction(idExpr, false);
             _fs->AddInstruction(_OP_CLOSURE, _fs->PushTarget(), _fs->_functions.size() - 1, 0);
             _fs->PopTarget();
             _fs->PushLocalVariable(varname, assignable);
             f->setContext(DC_LOCAL);
-            return new VarDecl(new Id(varname), new DeclExpr(f), assignable);
+            return new VarDecl(idExpr, new DeclExpr(f), assignable);
             //return f;
         } else if (_token == TK_CLASS) {
             Lex();
-            varname = Expect(TK_IDENTIFIER);
+            Id *idExpr = NULL;
+            varname = Expect(TK_IDENTIFIER, (Expr **)&idExpr);
             CheckDuplicateLocalIdentifier(varname, _SC("Class"), false);
             ClassDecl *c = ClassExp(NULL);
             c->setContext(DC_LOCAL);
             _fs->PopTarget();
             _fs->PushLocalVariable(varname, assignable);
-            return new VarDecl(new Id(varname), new DeclExpr(c), assignable);
+            return new VarDecl(idExpr, new DeclExpr(c), assignable);
             //return c;
         }
 
@@ -2209,7 +2227,8 @@ public:
 
 
         do {
-            varname = Expect(TK_IDENTIFIER);
+            Id *idExpr = NULL;
+            varname = Expect(TK_IDENTIFIER, (Expr**)&idExpr);
             CheckDuplicateLocalIdentifier(varname, assignable ? _SC("Local variable") : _SC("Named binding"), false);
             VarDecl *cur = NULL;
             if(_token == _SC('=')) {
@@ -2219,14 +2238,14 @@ public:
                 SQInteger dest = _fs->PushTarget();
                 if(dest != src) _fs->AddInstruction(_OP_MOVE, dest, src);
                 flags.push_back(OP_GET_FLAG_NO_ERROR | OP_GET_FLAG_KEEP_VAL);
-                cur = new VarDecl(new Id(varname), expr, assignable);
+                cur = new VarDecl(idExpr, expr, assignable);
             }
             else {
                 if (!assignable && !destructurer)
                     Error(_SC("Binding '%s' must be initialized"), _stringval(varname));
                 _fs->AddInstruction(_OP_LOADNULLS, _fs->PushTarget(),1);
                 flags.push_back(0);
-                cur = new VarDecl(new Id(varname), NULL, assignable);
+                cur = new VarDecl(idExpr, NULL, assignable);
                 //assert(dd);
                 //dd->addName(new Id(varname));
             }
@@ -2477,12 +2496,12 @@ public:
         Expr *contnr = NULL;
         Statement *body = NULL;
         SQObject idxname, valname;
-        Lex(); Expect(_SC('(')); valname = Expect(TK_IDENTIFIER);
+        Lex(); Expect(_SC('(')); valname = Expect(TK_IDENTIFIER, (Expr **)&idx);
         CheckDuplicateLocalIdentifier(valname, _SC("Iterator"), false);
 
         if(_token == _SC(',')) {
             idxname = valname;
-            Lex(); valname = Expect(TK_IDENTIFIER);
+            Lex(); valname = Expect(TK_IDENTIFIER, (Expr **)&val);
             CheckDuplicateLocalIdentifier(valname, _SC("Iterator"), false);
             if (_stringval(idxname) == _stringval(valname))
                 Error(_SC("foreach() key and value names are the same: %s"), _stringval(valname));
@@ -2522,7 +2541,7 @@ public:
         _fs->PopTarget();
         END_SCOPE();
 
-        return new ForeachStatement(new Id(idxname), new Id(valname), contnr, body);
+        return new ForeachStatement(idx, val, contnr, body);
     }
     SwitchStatement *parseSwitchStatement()
     {
@@ -2594,11 +2613,12 @@ public:
     FunctionDecl *parseFunctionStatement()
     {
         SQObject id;
-        Lex(); id = Expect(TK_IDENTIFIER);
+        Id *funcName = NULL;
+        Lex(); id = Expect(TK_IDENTIFIER, (Expr**)&funcName);
         _fs->PushTarget(0);
         _fs->AddInstruction(_OP_LOAD, _fs->PushTarget(), _fs->GetConstant(id));
         Expect(_SC('('));
-        FunctionDecl *f = CreateFunction(id);
+        FunctionDecl *f = CreateFunction(funcName);
         _fs->AddInstruction(_OP_CLOSURE, _fs->PushTarget(), _fs->_functions.size() - 1, 0);
         EmitDerefOp(_OP_NEWSLOT);
         _fs->PopTarget();
@@ -2628,7 +2648,7 @@ public:
 
         return decl;
     }
-    SQObject ExpectScalar()
+    SQObject ExpectScalar(LiteralExpr **r)
     {
         SQObject val;
         val._type = OT_NULL; val._unVal.nInteger = 0; //shut up GCC 4.x
@@ -2637,18 +2657,22 @@ public:
             case TK_INTEGER:
                 val._type = OT_INTEGER;
                 val._unVal.nInteger = _lex._nvalue;
+                *r = new LiteralExpr(_lex._nvalue);
                 break;
             case TK_FLOAT:
                 val._type = OT_FLOAT;
                 val._unVal.fFloat = _lex._fvalue;
+                *r = new LiteralExpr(_lex._fvalue);
                 break;
             case TK_STRING_LITERAL:
                 val = _fs->CreateString(_lex._svalue,_lex._longstr.size()-1);
+                *r = new LiteralExpr(_lex._svalue);
                 break;
             case TK_TRUE:
             case TK_FALSE:
                 val._type = OT_BOOL;
                 val._unVal.nInteger = _token == TK_TRUE ? 1 : 0;
+                *r = new LiteralExpr((bool)(_token == TK_TRUE ? 1 : 0));
                 break;
             case '-':
                 Lex();
@@ -2657,10 +2681,12 @@ public:
                 case TK_INTEGER:
                     val._type = OT_INTEGER;
                     val._unVal.nInteger = -_lex._nvalue;
+                    *r = new LiteralExpr(-_lex._nvalue);
                 break;
                 case TK_FLOAT:
                     val._type = OT_FLOAT;
                     val._unVal.fFloat = -_lex._fvalue;
+                    *r = new LiteralExpr(-_lex._fvalue);
                 break;
                 default:
                     Error(_SC("scalar expected : integer, float"));
@@ -2685,12 +2711,14 @@ public:
     ConstDecl *parseConstStatement(bool global)
     {
         Lex();
-        SQObject id = Expect(TK_IDENTIFIER);
+        Id *idExpr = NULL;
+        SQObject id = Expect(TK_IDENTIFIER, (Expr**)&idExpr);
         bool ignoreGlobalConst = global && !(_fs->lang_features & LF_FORBID_GLOBAL_CONST_REWRITE);
         CheckDuplicateLocalIdentifier(id, _SC("Constant"), ignoreGlobalConst);
 
         Expect('=');
-        SQObject val = ExpectScalar();
+        LiteralExpr *valExpr = NULL;
+        SQObject val = ExpectScalar(&valExpr);
         OptionalSemicolon();
 
         SQTable *enums = global ? _table(_ss(_vm)->_consts) : GetScopedConstsTable();
@@ -2699,17 +2727,18 @@ public:
         enums->NewSlot(strongid,SQObjectPtr(val));
         strongid.Null();
 
-        return new ConstDecl(new Id(id), val, global);
+        return new ConstDecl(idExpr, valExpr, global);
     }
 
     EnumDecl *parseEnumStatement(bool global)
     {
         Lex();
-        SQObject id = Expect(TK_IDENTIFIER);
+        Id *idExpr = NULL;
+        SQObject id = Expect(TK_IDENTIFIER, (Expr**)&idExpr);
         bool ignoreGlobalConst = global && !(_fs->lang_features & LF_FORBID_GLOBAL_CONST_REWRITE);
         CheckDuplicateLocalIdentifier(id, _SC("Enum"), ignoreGlobalConst);
 
-        EnumDecl *decl = new EnumDecl(_ss(_vm)->_alloc_ctx, new Id(id), global);
+        EnumDecl *decl = new EnumDecl(_ss(_vm)->_alloc_ctx, idExpr, global);
 
         Expect(_SC('{'));
 
@@ -2717,19 +2746,22 @@ public:
         table._flags = SQOBJ_FLAG_IMMUTABLE;
         SQInteger nval = 0;
         while(_token != _SC('}')) {
-            SQObject key = Expect(TK_IDENTIFIER);
+            Id *keyExpr = NULL;
+            SQObject key = Expect(TK_IDENTIFIER, (Expr **)&keyExpr);
             SQObject val;
+            LiteralExpr *valExpr = NULL;
             if(_token == _SC('=')) {
                 Lex();
-                val = ExpectScalar();
+                val = ExpectScalar(&valExpr);
             }
             else {
+                valExpr = new LiteralExpr(nval);
                 val._type = OT_INTEGER;
                 val._unVal.nInteger = nval++;
                 val._flags = 0;
             }
 
-            decl->addConst(new Id(key), val);
+            decl->addConst(keyExpr, valExpr);
 
             _table(table)->NewSlot(SQObjectPtr(key),SQObjectPtr(val));
             if(_token == ',') Lex();
@@ -2766,7 +2798,8 @@ public:
         _fs->AddInstruction(_OP_JMP, 0, 0);
         SQInteger jmppos = _fs->GetCurrentPos();
         _fs->SetInstructionParam(trappos, 1, (_fs->GetCurrentPos() - trappos));
-        Expect(TK_CATCH); Expect(_SC('(')); exid = Expect(TK_IDENTIFIER); Expect(_SC(')'));
+        Id *exId = NULL;
+        Expect(TK_CATCH); Expect(_SC('(')); exid = Expect(TK_IDENTIFIER, (Expr**)&exId); Expect(_SC(')'));
         {
             BEGIN_SCOPE();
             SQInteger ex_target = _fs->PushLocalVariable(exid, false);
@@ -2775,10 +2808,10 @@ public:
             _fs->SetInstructionParams(jmppos, 0, (_fs->GetCurrentPos() - jmppos), 0);
             END_SCOPE();
         }
-        return new TryStatement(t, new Id(exid), c);
+        return new TryStatement(t, exId, c);
     }
 
-    SQObject generateSurrogateFunctionName()
+    SQObject generateSurrogateFunctionName(Id **id)
     {
         const SQChar * fileName = (sq_type(_sourcename) == OT_STRING) ? _stringval(_sourcename) : _SC("unknown");
         int lineNum = int(_lex._currentline);
@@ -2787,16 +2820,18 @@ public:
 
         SQChar buf[MAX_FUNCTION_NAME_LEN];
         scsprintf(buf, MAX_FUNCTION_NAME_LEN, _SC("(%s:%d)"), rightSlash ? (rightSlash + 1) : fileName, lineNum);
+        *id = new Id(buf);
         return _fs->CreateString(buf);
     }
 
     DeclExpr *FunctionExp(SQInteger ftype,bool lambda = false)
     {
         Lex();
-        SQObject functionName = (_token == TK_IDENTIFIER) ? Expect(TK_IDENTIFIER) : generateSurrogateFunctionName();
+        Id *funcName = NULL;
+        SQObject functionName = (_token == TK_IDENTIFIER) ? Expect(TK_IDENTIFIER, (Expr**)&funcName) : generateSurrogateFunctionName(&funcName);
         Expect(_SC('('));
 
-        DeclExpr *r = new DeclExpr(CreateFunction(functionName, lambda));
+        DeclExpr *r = new DeclExpr(CreateFunction(funcName, lambda));
         _fs->AddInstruction(_OP_CLOSURE, _fs->PushTarget(), _fs->_functions.size() - 1, ftype == TK_FUNCTION?0:1);
         return r;
     }
@@ -2869,14 +2904,14 @@ public:
 
         return new IncExpr(arg, diff, IF_PREFIX);
     }
-    FunctionDecl *CreateFunction(SQObject &name,bool lambda = false, bool ctor = false)
+    FunctionDecl *CreateFunction(Id *name,bool lambda = false, bool ctor = false)
     {
         SQFuncState *funcstate = _fs->PushChildState(_ss(_vm));
-        FunctionDecl *f = ctor ? new ConstructorDecl(_ss(_vm)->_alloc_ctx, new Id(name)) : new FunctionDecl(_ss(_vm)->_alloc_ctx, new Id(name));
+        FunctionDecl *f = ctor ? new ConstructorDecl(_ss(_vm)->_alloc_ctx, name) : new FunctionDecl(_ss(_vm)->_alloc_ctx, name);
         funcstate->_name = name;
         SQObject paramname;
         SQObject thisName = _fs->CreateString(_SC("this"));
-        f->addParameter(new Id(thisName));
+        f->addParameter(new Id(_SC("this")));
 
         funcstate->AddParameter(thisName);
         funcstate->_sourcename = _sourcename;
@@ -2886,7 +2921,7 @@ public:
                 if(defparams > 0) Error(_SC("function with default parameters cannot have variable number of parameters"));
                 SQObject varargName = _fs->CreateString(_SC("vargv"));
                 funcstate->AddParameter(varargName);
-                f->addParameter(new Id(varargName));
+                f->addParameter(new Id(_SC("vargv")));
                 f->setVararg();
                 funcstate->_varparams = true;
                 Lex();
@@ -2894,7 +2929,8 @@ public:
                 break;
             }
             else {
-                paramname = Expect(TK_IDENTIFIER);
+                Id *paramId = NULL;
+                paramname = Expect(TK_IDENTIFIER, (Expr**)&paramId);
                 funcstate->AddParameter(paramname);
                 Expr *defVal = NULL;
                 if(_token == _SC('=')) {
@@ -2907,7 +2943,7 @@ public:
                     if(defparams > 0) Error(_SC("expected '='"));
                 }
 
-                f->addParameter(new Id(paramname), defVal);
+                f->addParameter(paramId, defVal);
 
                 if(_token == _SC(',')) Lex();
                 else if(_token != _SC(')')) Error(_SC("expected ')' or ','"));
@@ -2950,7 +2986,7 @@ public:
         _fs->_functions.push_back(func);
         _fs->PopChildState();
 
-        f->setSourceName(_sourcename);
+        f->setSourceName(_rawsourcename);
 
         return f;
     }
@@ -3301,11 +3337,11 @@ void CodegenVisitor::visitForeachStatement(ForeachStatement *foreachLoop) {
     foreachLoop->container()->visit(*this);
 
     SQInteger container = _fs->TopTarget();
-    SQInteger indexpos = _fs->PushLocalVariable(foreachLoop->idx()->id(), false);
+    SQInteger indexpos = _fs->PushLocalVariable(_fs->CreateString(foreachLoop->idx()->id()), false);
 
     _fs->AddInstruction(_OP_LOADNULLS, indexpos, 1);
 
-    SQInteger valuepos = _fs->PushLocalVariable(foreachLoop->val()->id(), false);
+    SQInteger valuepos = _fs->PushLocalVariable(_fs->CreateString(foreachLoop->val()->id()), false);
     _fs->AddInstruction(_OP_LOADNULLS, valuepos, 1);
 
     //push reference index
@@ -3419,7 +3455,7 @@ void CodegenVisitor::visitTryStatement(TryStatement *tryStmt) {
 
     {
         BEGIN_SCOPE();
-        SQInteger ex_target = _fs->PushLocalVariable(tryStmt->exceptionId()->id(), false);
+        SQInteger ex_target = _fs->PushLocalVariable(_fs->CreateString(tryStmt->exceptionId()->id()), false);
         _fs->SetInstructionParam(trappos, 0, ex_target);
         tryStmt->catchStatement()->visit(*this);
         _fs->SetInstructionParams(jmppos, 0, (_fs->GetCurrentPos() - jmppos), 0);
@@ -3551,7 +3587,7 @@ void CodegenVisitor::visitClassDecl(ClassDecl *klass) {
 }
 
 void CodegenVisitor::visitParamDecl(ParamDecl *param) {
-    _funcState->AddParameter(param->name()->id());
+    _funcState->AddParameter(_fs->CreateString(param->name()->id()));
     if (param->hasDefaultValue()) {
         param->defaultValue()->visit(*this);
     }
@@ -3573,7 +3609,7 @@ void CodegenVisitor::visitVarDecl(VarDecl *var) {
     }
 
     _last_pop = _fs->PopTarget();
-    _fs->PushLocalVariable(name->id(), var->isAssignable());
+    _fs->PushLocalVariable(_fs->CreateString(name->id()), var->isAssignable());
 }
 
 void CodegenVisitor::visitDeclGroup(DeclGroup *group) {
@@ -3610,7 +3646,7 @@ void CodegenVisitor::visitDesctructionDecl(DesctructionDecl *destruct) {
             _fs->AddInstruction(_OP_GET, targets[i], src, key_pos, flags);
         }
         else {
-            _fs->AddInstruction(_OP_LOAD, key_pos, _fs->GetConstant(d->name()->id()));
+            _fs->AddInstruction(_OP_LOAD, key_pos, _fs->GetConstant(_fs->CreateString(d->name()->id())));
             _fs->AddInstruction(_OP_GET, targets[i], src, key_pos, flags);
         }
     }
@@ -3672,9 +3708,19 @@ SQTable* CodegenVisitor::GetScopedConstsTable()
     return _table(consts);
 }
 
+SQObject CodegenVisitor::selectLiteral(LiteralExpr *lit) {
+    switch (lit->kind()) {
+    case LK_STRING: return _fs->CreateString(lit->s());
+    case LK_FLOAT: return SQObjectPtr(lit->f());
+    case LK_INT:  return SQObjectPtr(lit->i());
+    case LK_BOOL: return SQObjectPtr(lit->b());
+    case LK_NULL: return SQObjectPtr();
+    }
+}
+
 void CodegenVisitor::visitConstDecl(ConstDecl *decl) {
-    SQObject id = decl->name()->id();
-    SQObject value = decl->value();
+    SQObject id = _fs->CreateString(decl->name()->id());
+    SQObject value = selectLiteral(decl->value());
 
     SQTable *enums = decl->isGlobal() ? _table(_ss(&_vm)->_consts) : GetScopedConstsTable();
     SQObjectPtr strongid = id;
@@ -4242,7 +4288,7 @@ bool CodegenVisitor::IsGlobalConstant(const SQObject &name, SQObject &e)
 void CodegenVisitor::visitId(Id *id) {
     SQInteger pos = -1;
     SQObject constant;
-    SQObject idObj = id->id();
+    SQObject idObj = _fs->CreateString(id->id());
     bool assignable = false;
 
     if ((pos = _fs->GetLocalVariable(idObj, assignable)) != -1) {

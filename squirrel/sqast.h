@@ -149,12 +149,14 @@ enum IdType : SQInteger {
 
 class Id : public Expr {
 public:
-    Id(SQObject id) : Expr(TO_ID), _id(id), _outpos(ID_LOCAL) { assert(id._type == OT_STRING); }
+    Id(const SQChar *id) : Expr(TO_ID), _id(id), _outpos(ID_LOCAL) { 
+        _id = strdup(id); // TODO
+    }
 
     void visit(Visitor &visitor);
     void visitChildren(Visitor &visitor);
 
-    SQObject id() { return _id; }
+    const SQChar *id() { return _id; }
 
     void setOuterPos(SQInteger pos) { _outpos = pos; }
     
@@ -169,7 +171,7 @@ public:
 
 
 //private:
-    SQObject _id;
+    const SQChar *_id;
     SQInteger _outpos;
 };
 
@@ -241,22 +243,22 @@ private:
 
 class FieldAccessExpr : public AccessExpr {
 protected:
-    FieldAccessExpr(enum TreeOp op, Expr *receiver, SQChar *field, bool nullable) : AccessExpr(op, receiver, nullable), _fieldName(field) {}
+    FieldAccessExpr(enum TreeOp op, Expr *receiver, const SQChar *field, bool nullable) : AccessExpr(op, receiver, nullable), _fieldName(field) {}
     //bool canBeDefaultDelegate() const;
 
 public:
 
     bool canBeLiteral(bool defaultDelegate) const { return receiver()->op() != TO_BASE && !isNullable() && !defaultDelegate; }
-    SQChar *fieldName() const { return _fieldName; }
+    const SQChar *fieldName() const { return _fieldName; }
 
 private:
-    SQChar *_fieldName;
+    const SQChar *_fieldName;
 
 };
 
 class GetFieldExpr : public FieldAccessExpr {
 public:
-    GetFieldExpr(Expr *receiver, SQChar *field, bool nullable): FieldAccessExpr(TO_GETFIELD, receiver, field, nullable) { }
+    GetFieldExpr(Expr *receiver, const SQChar *field, bool nullable): FieldAccessExpr(TO_GETFIELD, receiver, field, nullable) { }
 
     void visit(Visitor &visitor);
     void visitChildren(Visitor &visitor);
@@ -265,7 +267,7 @@ public:
 
 class SetFieldExpr : public FieldAccessExpr {
 public:
-    SetFieldExpr(Expr *receiver, SQChar *field, Expr *value, bool nullable): FieldAccessExpr(TO_SETFIELD, receiver, field, nullable), _value(value) { }
+    SetFieldExpr(Expr *receiver, const SQChar *field, Expr *value, bool nullable): FieldAccessExpr(TO_SETFIELD, receiver, field, nullable), _value(value) { }
 
     void visit(Visitor &visitor);
     void visitChildren(Visitor &visitor);
@@ -365,6 +367,7 @@ public:
     }
     LiteralExpr(SQFloat f) : Expr(TO_LITERAL), _kind(LK_FLOAT) { _v.f = f; }
     LiteralExpr(SQInteger i) : Expr(TO_LITERAL), _kind(LK_INT) { _v.i = i; }
+    LiteralExpr(bool i) : Expr(TO_LITERAL), _kind(LK_BOOL) { _v.i = i; }
 
     void visit(Visitor &visitor) override;
     void visitChildren(Visitor &visitor) override;
@@ -599,8 +602,8 @@ public:
     bool isVararg() const { return _vararg; }
     Statement *body() const { return _body; }
 
-    void setSourceName(SQObjectPtr sn) { _sourcename = sn; }
-    SQObjectPtr sourceName() const { return _sourcename; }
+    void setSourceName(const SQChar *sn) { _sourcename = sn; }
+    const SQChar *sourceName() const { return _sourcename; }
 
 
 //private:
@@ -609,7 +612,7 @@ public:
     Statement * _body;
     bool _vararg;
     
-    SQObjectPtr _sourcename;
+    const SQChar *_sourcename;
 
 };
 
@@ -622,14 +625,14 @@ public:
 
 struct EnumConst {
     Id *id;
-    SQObject val;
+    LiteralExpr *val;
 };
 
 class EnumDecl : public Decl {
 public:
     EnumDecl(SQAllocContext ctx, Id *id, bool global) : Decl(TO_ENUM), _id(id), _consts(ctx), _global(global) {}
 
-    void addConst(Id *id, SQObject val) { _consts.push_back({ id, val }); }
+    void addConst(Id *id, LiteralExpr *val) { _consts.push_back({ id, val }); }
 
     sqvector<EnumConst> &consts() { return _consts; }
     const sqvector<EnumConst> &consts() const { return _consts; }
@@ -648,18 +651,18 @@ public:
 
 class ConstDecl : public Decl {
 public:
-    ConstDecl(Id *id, SQObject value, bool global) : Decl(TO_CONST), _id(id), _value(value), _global(global) {}
+    ConstDecl(Id *id, LiteralExpr *value, bool global) : Decl(TO_CONST), _id(id), _value(value), _global(global) {}
 
     void visit(Visitor &visitor) override;
     void visitChildren(Visitor &visitor) override;
 
     Id *name() const { return _id; }
-    SQObject value() const { return _value; }
+    LiteralExpr *value() const { return _value; }
     bool isGlobal() const { return _global; }
 
 //private:
     Id *_id;
-    SQObject _value;
+    LiteralExpr *_value;
     bool _global;
 };
 
