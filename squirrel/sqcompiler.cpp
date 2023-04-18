@@ -555,10 +555,12 @@ class CodegenVisitor : public Visitor {
     bool _donot_get;
 
     SQInteger _num_initial_bindings;
+
+    bool _lineinfo;
 public:
     CodegenVisitor(SQAllocContext ctx, SQFuncState &root_fs, const HSQOBJECT *bindings, SQCompiler &compiler, SQVM *vm, SQObjectPtr sourceName, SQObjectPtr &o);
 
-    void finish();
+    void finish(RootBlock *root);
 
     void Emit2ArgsOP(SQOpcode op, SQInteger p3 = 0);
 
@@ -600,6 +602,8 @@ public:
     void visitThrowStatement(ThrowStatement *throwStmt) override;
 
     void visitExprStatement(ExprStatement *stmt) override;
+
+    void generateTableDecl(TableDecl *tableDecl);
 
     void visitTableDecl(TableDecl *tableDecl) override;
 
@@ -681,6 +685,10 @@ public:
 
     SQObject selectLiteral(LiteralExpr *lit);
 
+    void maybeAddInExprLine(Expr *expr);
+
+    void addLineNumber(Statement *stmt);
+
 
 };
 
@@ -689,6 +697,8 @@ class SQCompiler
 public:
 
     const SQChar *_rawsourcename;
+
+    bool lineInfo() { return _lineinfo; }
 
     SQCompiler(SQVM *v, SQLEXREADFUNC rg, SQUserPointer up, const HSQOBJECT *bindings, const SQChar* sourcename, bool raiseerror, bool lineinfo) :
       _lex(_ss(v)),
@@ -945,11 +955,13 @@ public:
 
         if(setjmp(_errorjmp) == 0) {
             Lex();
+            rootBlock->setStartLine(_lex._currentline);
             while(_token > 0){
                 rootBlock->addStatement(parseStatement());
                 if(_lex._prevtoken != _SC('}') && _lex._prevtoken != _SC(';')) OptionalSemicolon();
             }
             _fs->SetStackSize(stacksize);
+            rootBlock->setEndLine(_lex._currentline);
             _fs->AddLineInfos(_lex._currentline, _lineinfo, true);
             _fs->AddInstruction(_OP_RETURN, 0xFF);
 
@@ -991,7 +1003,8 @@ public:
     Statement *parseStatement(bool closeframe = true)
     {
         Statement *result = NULL;
-        _fs->AddLineInfos(_lex._currentline, _lineinfo);
+        SQInteger line = _lex._currentline;
+        _fs->AddLineInfos(line, _lineinfo);
         switch(_token){
         case _SC(';'):  Lex(); result = new EmptyStatement();         break;
         case TK_IF:     result = parseIfStatement();          break;
@@ -1110,6 +1123,7 @@ public:
             break;
         }
         assert(result);
+        result->setLinePos(line);
         _fs->SnoozeOpt();
         return result;
     }
@@ -1184,8 +1198,10 @@ public:
         SQExpressionContext saved_expression_context = _expression_context;
         _expression_context = expression_context;
 
+        SQInteger line = _lex._prevtoken == _SC('\n') ? _lex._lasttokenline : _lex._currentline;
+
         if (_ss(_vm)->_lineInfoInExpressions && _fs)
-          _fs->AddLineInfos(_lex._prevtoken == _SC('\n') ? _lex._lasttokenline: _lex._currentline, _lineinfo, false);
+          _fs->AddLineInfos(line, _lineinfo, false);
 
          SQExpState es = _es;
         _es.etype     = EXPR;
@@ -1314,6 +1330,7 @@ public:
         }
         _es = es;
         _expression_context = saved_expression_context;
+        expr->setLinePos(line);
         return expr;
     }
     template<typename T> Expr *INVOKE_EXP(T f)
@@ -1865,11 +1882,13 @@ public:
                 Lex();
                 ArrayExpr *arr = new ArrayExpr(_ss(_vm)->_alloc_ctx);
                 while(_token != _SC(']')) {
+                    SQInteger line = _lex._currentline;
                     #if SQ_LINE_INFO_IN_STRUCTURES
                     if (key < 100)
-                      _fs->AddLineInfos(_lex._currentline, false);
+                      _fs->AddLineInfos(line, false);
                     #endif
                     Expr *v = Expression(SQE_RVALUE);
+                    v->setLinePos(line);
                     arr->addValue(v);
                     if(_token == _SC(',')) Lex();
                     SQInteger val = _fs->PopTarget();
@@ -1935,8 +1954,8 @@ public:
             r = new UnExpr(TO_PAREN, Expression(_expression_context));
             Expect(_SC(')'));
             break;
-        case TK___LINE__: EmitLoadConstInt(_lex._currentline,-1); Lex(); break;
-        case TK___FILE__: _fs->AddInstruction(_OP_LOAD, _fs->PushTarget(), _fs->GetConstant(_sourcename)); Lex(); break;
+        case TK___LINE__: r = new LiteralExpr(_lex._currentline);  EmitLoadConstInt(_lex._currentline, -1); Lex(); break;
+        case TK___FILE__: r = new LiteralExpr(_rawsourcename); _fs->AddInstruction(_OP_LOAD, _fs->PushTarget(), _fs->GetConstant(_sourcename)); Lex(); break;
         default: Error(_SC("expression expected"));
         }
         _es.etype = EXPR;
@@ -2055,9 +2074,10 @@ public:
         _member_constant_keys_check.push_back(memberConstantKeys);
         NewObjectType otype = separator==_SC(',') ? NOT_TABLE : NOT_CLASS;
         while(_token != terminator) {
+            SQInteger line = _lex._currentline;
             #if SQ_LINE_INFO_IN_STRUCTURES
             if (nkeys < 100)
-              _fs->AddLineInfos(_lex._currentline, false);
+              _fs->AddLineInfos(line, false);
             #endif
             bool isstatic = false;
             //check if is an static
@@ -2076,7 +2096,8 @@ public:
                 SQObject id = tk == TK_FUNCTION ? Expect(TK_IDENTIFIER, (Expr **)&funcName) : _fs->CreateString(_SC("constructor"));
                 SQChar *lit = _stringval(id);
                 if (!funcName) { funcName = new Id(_SC("constructor")); }
-                LiteralExpr *key = new LiteralExpr(lit);
+                LiteralExpr *key = new LiteralExpr(funcName->id());
+                key->setLinePos(line);
                 CheckMemberUniqueness(*memberConstantKeys, id);
                 Expect(_SC('('));
                 _fs->AddInstruction(_OP_LOAD, _fs->PushTarget(), _fs->GetConstant(id));
@@ -2095,6 +2116,7 @@ public:
                 else if (_token == TK_INTEGER)
                     firstId = SQObjectPtr(_lex._nvalue);
                 Expr *key = Expression(SQE_RVALUE);
+                key->setLinePos(line);
                 if (!sq_isnull(firstId) && _fs->_instructions.size() == prevInstrSize+1) {
                     unsigned char op = _fs->_instructions.back().op;
                     if (op == _OP_LOAD || op == _OP_LOADINT)
@@ -2111,6 +2133,7 @@ public:
                     SQObject id = Expect(TK_STRING_LITERAL);
                     SQChar *lit = _stringval(id);
                     LiteralExpr *key = new LiteralExpr(lit);
+                    key->setLinePos(line);
                     CheckMemberUniqueness(*memberConstantKeys, id);
                     _fs->AddInstruction(_OP_LOAD, _fs->PushTarget(), _fs->GetConstant(id));
                     Expect(_SC(':')); 
@@ -2123,6 +2146,7 @@ public:
                 SQObject id = Expect(TK_IDENTIFIER, (Expr **)&idExpr);
                 SQChar *lit = _stringval(id);
                 LiteralExpr *key = new LiteralExpr(lit);
+                key->setLinePos(line);
                 CheckMemberUniqueness(*memberConstantKeys, id);
                 _fs->AddInstruction(_OP_LOAD, _fs->PushTarget(), _fs->GetConstant(id));
                 // TODO:
@@ -2956,18 +2980,27 @@ public:
 
         SQFuncState *currchunk = _fs;
         _fs = funcstate;
-        Statement *body = NULL;
+        Block *body = NULL;
+        SQInteger startLine = _lex._currentline;
         if(lambda) {
-            _fs->AddLineInfos(_lex._prevtoken == _SC('\n') ? _lex._lasttokenline: _lex._currentline, _lineinfo, true);
+            SQInteger line = _lex._prevtoken == _SC('\n') ? _lex._lasttokenline : _lex._currentline;
+            _fs->AddLineInfos(line, _lineinfo, true);
             Expr *expr = Expression(SQE_REGULAR);
-            body = new ReturnStatement(expr);
+            expr->setLinePos(line);
+            ReturnStatement *retStmt = new ReturnStatement(expr);
+            retStmt->setIsLambda();
+            body = new Block(_ss(_vm)->_alloc_ctx);
+            body->addStatement(retStmt);
             _fs->AddInstruction(_OP_RETURN, 1, _fs->PopTarget());}
         else {
             if (_token != '{')
                 Error(_SC("'{' expected"));
-            body = parseStatement(false);
+            body = (Block *)parseStatement(false);
         }
-        funcstate->AddLineInfos(_lex._prevtoken == _SC('\n')?_lex._lasttokenline:_lex._currentline, _lineinfo, true);
+        SQInteger line2 = _lex._prevtoken == _SC('\n') ? _lex._lasttokenline : _lex._currentline;
+        body->setStartLine(startLine);
+        body->setEndLine(line2);
+        funcstate->AddLineInfos(line2, _lineinfo, true);
         funcstate->AddInstruction(_OP_RETURN, -1);
 
         if (!(funcstate->lang_features & LF_DISABLE_OPTIMIZER)) {
@@ -3081,9 +3114,11 @@ bool Compile(SQVM *vm,SQLEXREADFUNC rg, SQUserPointer up, const HSQOBJECT *bindi
     SQFuncState funcstate(_ss(vm), NULL, ThrowError, &p);
     CodegenVisitor codegen(_ss(vm)->_alloc_ctx, funcstate, bindings, p, vm, p.sourcename(), out);
 
+    // TODO:
+
     r->visit(codegen);
 
-    codegen.finish();
+    codegen.finish(r);
 
     return r != NULL;
 }
@@ -3098,6 +3133,8 @@ CodegenVisitor::CodegenVisitor(SQAllocContext ctx, SQFuncState &root_fs, const H
     _fs->lang_features = compiler._lang_features;
     _stacksize = _fs->GetStackSize();
 
+    _lineinfo = compiler.lineInfo();
+
     _donot_get = false;
 
     if (bindings) {
@@ -3109,9 +3146,9 @@ CodegenVisitor::CodegenVisitor(SQAllocContext ctx, SQFuncState &root_fs, const H
     }
 }
 
-void CodegenVisitor::finish() {
+void CodegenVisitor::finish(RootBlock *root) {
     _fs->SetStackSize(_stacksize);
-    //_fs->AddLineInfos(_lex._currentline, _lineinfo, true);
+    _fs->AddLineInfos(root->endLine(), _lineinfo, true);
     _fs->AddInstruction(_OP_RETURN, 0xFF);
 
     if (!(_fs->lang_features & LF_DISABLE_OPTIMIZER)) {
@@ -3189,9 +3226,13 @@ void CodegenVisitor::EmitDerefOp(SQOpcode op)
 }
 
 void CodegenVisitor::visitBlock(Block *block) {
+    addLineNumber(block);
+
     BEGIN_SCOPE();
 
     const sqvector<Statement *> &statements = block->statements();
+
+    //if (block->linePos() != -1) _fs->AddLineInfos(block->linePos(), _lineinfo);
 
     for (int i = 0; i < statements.size(); ++i) {
         Statement *stmt = statements[i];
@@ -3203,6 +3244,7 @@ void CodegenVisitor::visitBlock(Block *block) {
 }
 
 void CodegenVisitor::visitIfStatement(IfStatement *ifStmt) {
+    addLineNumber(ifStmt);
     BEGIN_SCOPE();
 
     ifStmt->condition()->visit(*this);
@@ -3226,6 +3268,8 @@ void CodegenVisitor::visitIfStatement(IfStatement *ifStmt) {
 }
 
 void CodegenVisitor::visitWhileStatement(WhileStatement *whileLoop) {
+    addLineNumber(whileLoop);
+
     BEGIN_SCOPE();
     {
         SQInteger jmppos = _fs->GetCurrentPos();
@@ -3253,6 +3297,8 @@ void CodegenVisitor::visitWhileStatement(WhileStatement *whileLoop) {
 }
 
 void CodegenVisitor::visitDoWhileStatement(DoWhileStatement *doWhileLoop) {
+    addLineNumber(doWhileLoop);
+
     BEGIN_SCOPE();
     {
         SQInteger jmptrg = _fs->GetCurrentPos();
@@ -3274,6 +3320,8 @@ void CodegenVisitor::visitDoWhileStatement(DoWhileStatement *doWhileLoop) {
 }
 
 void CodegenVisitor::visitForStatement(ForStatement *forLoop) {
+    addLineNumber(forLoop);
+
     BEGIN_SCOPE();
 
     if (forLoop->initializer()) {
@@ -3332,6 +3380,7 @@ void CodegenVisitor::visitForStatement(ForStatement *forLoop) {
 }
 
 void CodegenVisitor::visitForeachStatement(ForeachStatement *foreachLoop) {
+    addLineNumber(foreachLoop);
     BEGIN_SCOPE();
 
     foreachLoop->container()->visit(*this);
@@ -3364,6 +3413,7 @@ void CodegenVisitor::visitForeachStatement(ForeachStatement *foreachLoop) {
 }
 
 void CodegenVisitor::visitSwitchStatement(SwitchStatement *swtch) {
+    addLineNumber(swtch);
     BEGIN_SCOPE();
 
     swtch->expression()->visit(*this);
@@ -3432,6 +3482,7 @@ void CodegenVisitor::visitSwitchStatement(SwitchStatement *swtch) {
 }
 
 void CodegenVisitor::visitTryStatement(TryStatement *tryStmt) {
+    addLineNumber(tryStmt);
     _fs->AddInstruction(_OP_PUSHTRAP, 0, 0);
     _fs->_traps++;
 
@@ -3464,6 +3515,7 @@ void CodegenVisitor::visitTryStatement(TryStatement *tryStmt) {
 }
 
 void CodegenVisitor::visitBreakStatement(BreakStatement *breakStmt) {
+    addLineNumber(breakStmt);
     if (_fs->_breaktargets.size() <= 0) _compiler.Error(_SC("'break' has to be in a loop block"));
     if (_fs->_breaktargets.top() > 0) {
         _fs->AddInstruction(_OP_POPTRAP, _fs->_breaktargets.top(), 0);
@@ -3474,6 +3526,7 @@ void CodegenVisitor::visitBreakStatement(BreakStatement *breakStmt) {
 }
 
 void CodegenVisitor::visitContinueStatement(ContinueStatement *continueStmt) {
+    addLineNumber(continueStmt);
     if (_fs->_continuetargets.size() <= 0) _compiler.Error(_SC("'continue' has to be in a loop block"));
     if (_fs->_continuetargets.top() > 0) {
         _fs->AddInstruction(_OP_POPTRAP, _fs->_continuetargets.top(), 0);
@@ -3484,12 +3537,19 @@ void CodegenVisitor::visitContinueStatement(ContinueStatement *continueStmt) {
 }
 
 void CodegenVisitor::visitTerminateStatement(TerminateStatement *terminator) {
+    addLineNumber(terminator);
     if (terminator->argument()) {
         terminator->argument()->visit(*this);
     }
 }
 
 void CodegenVisitor::visitReturnStatement(ReturnStatement *retStmt) {
+    if (retStmt->isLambdaReturn()) {
+        Expr *body = retStmt->argument();
+        assert(body && body->linePos() != -1);
+        _fs->AddLineInfos(body->linePos(), _lineinfo, true);
+    }
+
     SQInteger retexp = _fs->GetCurrentPos() + 1;
     visitTerminateStatement(retStmt);
 
@@ -3528,11 +3588,12 @@ void CodegenVisitor::visitThrowStatement(ThrowStatement *throwStmt) {
 }
 
 void CodegenVisitor::visitExprStatement(ExprStatement *stmt) {
+    addLineNumber(stmt);
     stmt->expression()->visit(*this);
     _fs->DiscardTarget();
 }
 
-void CodegenVisitor::visitTableDecl(TableDecl *tableDecl) {
+void CodegenVisitor::generateTableDecl(TableDecl *tableDecl) {
     bool isKlass = tableDecl->op() == TO_CLASS;
     const auto members = tableDecl->members();
 
@@ -3542,9 +3603,13 @@ void CodegenVisitor::visitTableDecl(TableDecl *tableDecl) {
 
     for (int i = 0; i < members.size(); ++i) {
         const TableMember &m = members[i];
+#if SQ_LINE_INFO_IN_STRUCTURES
+        if (i < 100 && m.key->linePos() != -1) {
+            _fs->AddLineInfos(m.key->linePos(), false);
+        }
+#endif
         m.key->visit(*this);
         m.value->visit(*this);
-
         SQInteger val = _fs->PopTarget();
         SQInteger key = _fs->PopTarget();
         SQInteger table = _fs->TopTarget(); //<<BECAUSE OF THIS NO COMMON EMIT FUNC IS POSSIBLE
@@ -3558,8 +3623,13 @@ void CodegenVisitor::visitTableDecl(TableDecl *tableDecl) {
     }
 }
 
-void CodegenVisitor::visitClassDecl(ClassDecl *klass) {
+void CodegenVisitor::visitTableDecl(TableDecl *tableDecl) {
+    addLineNumber(tableDecl);
+    generateTableDecl(tableDecl);
+}
 
+void CodegenVisitor::visitClassDecl(ClassDecl *klass) {
+    addLineNumber(klass);
     if (klass->context() == DC_SLOT) {
         assert(klass->classKey());
         bool old_dng = _donot_get;
@@ -3577,7 +3647,7 @@ void CodegenVisitor::visitClassDecl(ClassDecl *klass) {
 
     _fs->AddInstruction(_OP_NEWOBJ, _fs->PushTarget(), baseIdx, 0, NOT_CLASS);
 
-    CodegenVisitor::visitTableDecl(klass);
+    generateTableDecl(klass);
 
 
     if (klass->context() == DC_SLOT) {
@@ -3596,6 +3666,7 @@ void CodegenVisitor::visitParamDecl(ParamDecl *param) {
 SQInteger _last_pop = -1;
 
 void CodegenVisitor::visitVarDecl(VarDecl *var) {
+    addLineNumber(var);
     Id *name = var->name();
 
     if (var->initializer()) {
@@ -3613,6 +3684,7 @@ void CodegenVisitor::visitVarDecl(VarDecl *var) {
 }
 
 void CodegenVisitor::visitDeclGroup(DeclGroup *group) {
+    addLineNumber(group);
     const auto declarations = group->declarations();
 
     for (int i = 0; i < declarations.size(); ++i) {
@@ -3622,6 +3694,7 @@ void CodegenVisitor::visitDeclGroup(DeclGroup *group) {
 }
 
 void CodegenVisitor::visitDesctructionDecl(DesctructionDecl *destruct) {
+    addLineNumber(destruct);
     sqvector<SQInteger> targets(_ss(&_vm)->_alloc_ctx);
 
     const auto declarations = destruct->declarations();
@@ -3656,6 +3729,7 @@ void CodegenVisitor::visitDesctructionDecl(DesctructionDecl *destruct) {
 }
 
 void CodegenVisitor::visitFunctionDecl(FunctionDecl *func) {
+    addLineNumber(func);
     SQFuncState *oldFuncState = _funcState;
     SQFuncState *funcstate = _fs->PushChildState(_ss(&_vm));
     funcstate->_name = func->name()->id();
@@ -3679,8 +3753,14 @@ void CodegenVisitor::visitFunctionDecl(FunctionDecl *func) {
 
     SQFuncState *currchunk = _fs;
     _fs = _funcState;
-
+    
+    Block *body = (Block*)func->body();
+    SQInteger startLine = body->startLine();
+    if (startLine != -1) {
+        funcstate->AddLineInfos(startLine, _lineinfo, false);
+    }
     func->body()->visit(*this);
+    funcstate->AddLineInfos(body->endLine(), _lineinfo, true);
     // funcstate->AddLineInfos(_lex._prevtoken == _SC('\n')?_lex._lasttokenline:_lex._currentline, _lineinfo, true);
     SQInstruction &i = funcstate->GetInstruction(funcstate->GetCurrentPos());
     funcstate->AddInstruction(_OP_RETURN, -1);
@@ -3719,6 +3799,7 @@ SQObject CodegenVisitor::selectLiteral(LiteralExpr *lit) {
 }
 
 void CodegenVisitor::visitConstDecl(ConstDecl *decl) {
+    addLineNumber(decl);
     SQObject id = _fs->CreateString(decl->name()->id());
     SQObject value = selectLiteral(decl->value());
 
@@ -3729,6 +3810,7 @@ void CodegenVisitor::visitConstDecl(ConstDecl *decl) {
 }
 
 void CodegenVisitor::visitEnumDecl(EnumDecl *enums) {
+    addLineNumber(enums);
     SQObject table = _fs->CreateTable();
     table._flags = SQOBJ_FLAG_IMMUTABLE;
     SQInteger nval = 0;
@@ -3766,7 +3848,25 @@ bool isOuter(Expr *expr) {
     return expr->asId()->isOuter();
 }
 
+void CodegenVisitor::maybeAddInExprLine(Expr *expr) {
+    if (!_ss(&_vm)->_lineInfoInExpressions) return;
+
+    if (expr->linePos() != -1) {
+        _fs->AddLineInfos(expr->linePos(), _lineinfo, false);
+    }
+}
+
+void CodegenVisitor::addLineNumber(Statement *stmt) {
+    SQInteger line = stmt->linePos();
+    if (line != -1) {
+        _fs->AddLineInfos(line, _lineinfo, false);
+    }
+}
+
 void CodegenVisitor::visitCallExpr(CallExpr *call) {
+
+    maybeAddInExprLine(call);
+
     Expr *callee = call->callee();
     bool isNullCall = call->isNullable();
 
@@ -3801,34 +3901,6 @@ void CodegenVisitor::visitCallExpr(CallExpr *call) {
         _fs->AddInstruction(_OP_MOVE, _fs->PushTarget(), 0);
     }
 
-    //switch (guessCalleeType(callee)) // TODO
-    //{
-    //case OBJECT:
-    //    if (!isNullCall) {
-    //        SQInteger key = _fs->PopTarget();  /* location of the key */
-    //        SQInteger table = _fs->PopTarget();  /* location of the object */
-    //        SQInteger closure = _fs->PushTarget(); /* location for the closure */
-    //        SQInteger ttarget = _fs->PushTarget(); /* location for 'this' pointer */
-    //        _fs->AddInstruction(_OP_PREPCALL, closure, key, table, ttarget);
-    //    }
-    //    else {
-    //        SQInteger self = _fs->GetUpTarget(1);  /* location of the object */
-    //        SQInteger storedSelf = _fs->PushTarget();
-    //        _fs->AddInstruction(_OP_MOVE, storedSelf, self);
-    //        _fs->PopTarget();
-    //        Emit2ArgsOP(_OP_GET, OP_GET_FLAG_NO_ERROR | OP_GET_FLAG_ALLOW_DEF_DELEGATE);
-    //        SQInteger ttarget = _fs->PushTarget();
-    //        _fs->AddInstruction(_OP_MOVE, ttarget, storedSelf);
-    //    }
-    //    break;
-    //case OUTER:
-    //    _fs->AddInstruction(_OP_GETOUTER, _fs->PushTarget(), callee->asId()->outerPos());
-    //case BASE:
-    //default:
-    //    _fs->AddInstruction(_OP_MOVE, _fs->PushTarget(), 0);
-    //    break;
-    //}
-
     const auto args = call->arguments();
 
     for (int i = 0; i < args.size(); ++i) {
@@ -3849,15 +3921,18 @@ void CodegenVisitor::visitCallExpr(CallExpr *call) {
 }
 
 void CodegenVisitor::visitBaseExpr(BaseExpr *base) {
+    maybeAddInExprLine(base);
     _fs->AddInstruction(_OP_GETBASE, _fs->PushTarget());
     base->setPos(_fs->TopTarget());
 }
 
 void CodegenVisitor::visitCalleeExpr(CalleeExpr *expr) {
+    maybeAddInExprLine(expr);
     _fs->AddInstruction(_OP_LOADCALLEE, _fs->PushTarget());
 }
 
 void CodegenVisitor::visitRootExpr(RootExpr *expr) {
+    maybeAddInExprLine(expr);
     _fs->AddInstruction(_OP_LOADROOT, _fs->PushTarget());
 }
 
@@ -3866,6 +3941,7 @@ void CodegenVisitor::visitThisExpr(ThisExpr *expr) {
 }
 
 void CodegenVisitor::visitLiteralExpr(LiteralExpr *lit) {
+    maybeAddInExprLine(lit);
     switch (lit->kind()) {
     case LK_STRING:
         _fs->AddInstruction(_OP_LOAD, _fs->PushTarget(), _fs->GetConstant(_fs->CreateString(lit->s())));
@@ -3878,12 +3954,18 @@ void CodegenVisitor::visitLiteralExpr(LiteralExpr *lit) {
 }
 
 void CodegenVisitor::visitArrayExpr(ArrayExpr *expr) {
+    maybeAddInExprLine(expr);
     const auto inits = expr->initialziers();
 
     _fs->AddInstruction(_OP_NEWOBJ, _fs->PushTarget(), inits.size(), 0, NOT_ARRAY);
 
     for (int i = 0; i < inits.size(); ++i) {
-        inits[i]->visit(*this);
+        Expr *valExpr = inits[i];
+#if SQ_LINE_INFO_IN_STRUCTURES
+        if (i < 100 && valExpr->linePos() != -1)
+            _fs->AddLineInfos(valExpr->linePos(), false);
+#endif
+        valExpr->visit(*this);
         SQInteger val = _fs->PopTarget();
         SQInteger array = _fs->TopTarget();
         _fs->AddInstruction(_OP_APPENDARRAY, array, val, AAT_STACK);
@@ -3907,6 +3989,7 @@ void CodegenVisitor::emitDelete(Expr *argument) {
 }
 
 void CodegenVisitor::visitUnExpr(UnExpr *unary) {
+    maybeAddInExprLine(unary);
     switch (unary->op())
     {
     case TO_NEG: emitUnaryOp(_OP_NEG, unary->argument()); break;
@@ -4103,6 +4186,7 @@ bool CodegenVisitor::CanBeDefaultDelegate(const SQChar *key)
 }
 
 void CodegenVisitor::visitGetFieldExpr(GetFieldExpr *expr) {
+    maybeAddInExprLine(expr);
     expr->receiver()->visit(*this);
 
     SQObject nameObj = _fs->CreateString(expr->fieldName());
@@ -4135,6 +4219,7 @@ void CodegenVisitor::visitGetFieldExpr(GetFieldExpr *expr) {
 }
 
 void CodegenVisitor::visitGetTableExpr(GetTableExpr *expr) {
+    maybeAddInExprLine(expr);
     expr->receiver()->visit(*this);
     expr->key()->visit(*this);
 
@@ -4149,6 +4234,7 @@ void CodegenVisitor::visitGetTableExpr(GetTableExpr *expr) {
 }
 
 void CodegenVisitor::visitBinExpr(BinExpr *expr) {
+    maybeAddInExprLine(expr);
     switch (expr->op()) {
     case TO_NEWSLOT: emitNewSlot(expr->lhs(), expr->rhs());  break;
     case TO_NULLC: emitJpmArith(_OP_NULLCOALESCE, expr->lhs(), expr->rhs()); break;
@@ -4187,6 +4273,7 @@ void CodegenVisitor::visitBinExpr(BinExpr *expr) {
 }
 
 void CodegenVisitor::visitTerExpr(TerExpr *expr) {
+    maybeAddInExprLine(expr);
     assert(expr->op() == TO_TERNARY);
 
     expr->a()->visit(*this);
@@ -4211,6 +4298,7 @@ void CodegenVisitor::visitTerExpr(TerExpr *expr) {
 }
 
 void CodegenVisitor::visitIncExpr(IncExpr *expr) {
+    maybeAddInExprLine(expr);
     Expr *arg = expr->argument();
     bool old_dng = _donot_get;
     _donot_get = true;
@@ -4286,6 +4374,7 @@ bool CodegenVisitor::IsGlobalConstant(const SQObject &name, SQObject &e)
 }
 
 void CodegenVisitor::visitId(Id *id) {
+    maybeAddInExprLine(id);
     SQInteger pos = -1;
     SQObject constant;
     SQObject idObj = _fs->CreateString(id->id());

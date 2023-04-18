@@ -108,7 +108,7 @@ class GetTableExpr;
 
 class Node {
 protected:
-    Node(enum TreeOp op): _op(op) {}
+    Node(enum TreeOp op): _op(op), _linepos(-1) {}
 public:
     virtual ~Node() {}
 
@@ -125,7 +125,13 @@ public:
     GetFieldExpr *asGetField() { assert(_op == TO_GETFIELD); return (GetFieldExpr*)this; }
     GetTableExpr *asGetTable() { assert(_op == TO_GETTABLE); return (GetTableExpr*)this; }
 
+    SQInteger linePos() const { return _linepos; }
+    void setLinePos(SQInteger pos) { _linepos = pos; }
+
 private:
+
+    SQInteger _linepos;
+
     enum TreeOp _op;
 };
 
@@ -708,7 +714,7 @@ public:
 
 class Block : public Statement {
 public:
-    Block(SQAllocContext ctx, bool is_root = false) : Statement(TO_BLOCK), _statements(ctx), _is_root(is_root) {}
+    Block(SQAllocContext ctx, bool is_root = false) : Statement(TO_BLOCK), _statements(ctx), _is_root(is_root), _endLine(-1) {}
 
     void addStatement(Statement *stmt) { _statements.push_back(stmt); }
 
@@ -720,7 +726,13 @@ public:
 
     bool isRoot() const { return _is_root; }
 
+    void setStartLine(SQInteger l) { setLinePos(l); }
+    void setEndLine(SQInteger l) { _endLine = l; }
+
+    SQInteger startLine() const { return linePos(); }
+    SQInteger endLine() const { return _endLine; }
 private:
+    SQInteger _endLine;
     bool _is_root;
     sqvector<Statement *> _statements;
 };
@@ -728,6 +740,8 @@ private:
 class RootBlock : public Block {
 public:
     RootBlock(SQAllocContext ctx) : Block(ctx, true) {}
+
+
 };
 
 class IfStatement : public Statement {
@@ -885,9 +899,15 @@ public:
 
 class ReturnStatement : public TerminateStatement {
 public:
-    ReturnStatement(Expr *arg) : TerminateStatement(TO_RETURN, arg) {}
+    ReturnStatement(Expr *arg) : TerminateStatement(TO_RETURN, arg), _isLambda(false) {}
 
     void visit(Visitor &visitor) override;
+
+    void setIsLambda() { _isLambda = true; }
+    bool isLambdaReturn() const { return _isLambda; }
+
+private:
+    bool _isLambda;
 };
 
 class YieldStatement : public TerminateStatement {

@@ -403,9 +403,13 @@ void SQFuncState::AddParameter(const SQObject &name)
 
 void SQFuncState::AddLineInfos(SQInteger line,bool lineop,bool force)
 {
+
     if(_lastline!=line || force){
         SQLineInfo li;
         li._line=line;li._op=(GetCurrentPos()+1);
+        if (li._line == 9 && li._op == 11) {
+            printf("");
+        }
         if(lineop)AddInstruction(_OP_LINE,0,line);
         if(_lastline!=line) {
             _lineinfos.push_back(li);
