@@ -557,10 +557,16 @@ class CodegenVisitor : public Visitor {
     SQInteger _num_initial_bindings;
 
     bool _lineinfo;
+
+    jmp_buf _errorjmp;
 public:
     CodegenVisitor(SQAllocContext ctx, SQFuncState &root_fs, const HSQOBJECT *bindings, SQCompiler &compiler, SQVM *vm, SQObjectPtr sourceName, SQObjectPtr &o);
 
+    void generate(RootBlock *root);
+
     void finish(RootBlock *root);
+
+    void error(const SQChar *s, ...);
 
     void Emit2ArgsOP(SQOpcode op, SQInteger p3 = 0);
 
@@ -654,6 +660,10 @@ public:
     void emitJpmArith(SQOpcode op, Expr *lhs, Expr *rhs);
 
     void emitCompoundArith(SQOpcode op, SQInteger opcode, Expr *lvalue, Expr *rvalue);
+
+    void checkIfAssiagnable(BinExpr *expr);
+
+    bool isLValue(Expr *expr);
 
     void emitNewSlot(Expr *lvalue, Expr *rvalue);
 
@@ -2986,8 +2996,9 @@ public:
             SQInteger line = _lex._prevtoken == _SC('\n') ? _lex._lasttokenline : _lex._currentline;
             _fs->AddLineInfos(line, _lineinfo, true);
             Expr *expr = Expression(SQE_REGULAR);
-            expr->setLinePos(line);
+            //expr->setLinePos(line);
             ReturnStatement *retStmt = new ReturnStatement(expr);
+            retStmt->setLinePos(line);
             retStmt->setIsLambda();
             body = new Block(_ss(_vm)->_alloc_ctx);
             body->addStatement(retStmt);
@@ -3114,12 +3125,13 @@ bool Compile(SQVM *vm,SQLEXREADFUNC rg, SQUserPointer up, const HSQOBJECT *bindi
     SQFuncState funcstate(_ss(vm), NULL, ThrowError, &p);
     CodegenVisitor codegen(_ss(vm)->_alloc_ctx, funcstate, bindings, p, vm, p.sourcename(), out);
 
-    // TODO:
+    codegen.generate(r);
 
+/*
     r->visit(codegen);
 
     codegen.finish(r);
-
+*/
     return r != NULL;
 }
 
@@ -3143,6 +3155,30 @@ CodegenVisitor::CodegenVisitor(SQAllocContext ctx, SQFuncState &root_fs, const H
             _scopedconsts.push_back(*bindings);
             _num_initial_bindings = 1;
         }
+    }
+}
+
+void CodegenVisitor::error(const SQChar *s, ...) {
+    SQChar compilererror[MAX_COMPILER_ERROR_LEN] = { 0 };
+    va_list vl;
+    va_start(vl, s);
+    scvsprintf(compilererror, MAX_COMPILER_ERROR_LEN, s, vl);
+    va_end(vl);
+    longjmp(_errorjmp, 1);
+}
+
+void CodegenVisitor::generate(RootBlock *root) {
+    if (setjmp(_errorjmp) == 0) {
+        root->visit(*this);
+        finish(root);
+    } else {
+        //if (_raiseerror && _ss(_vm)->_compilererrorhandler) {
+        //    _ss(_vm)->_compilererrorhandler(_vm, _compilererror, sq_type(_sourcename) == OT_STRING ? _stringval(_sourcename) : _SC("unknown"),
+        //        _lex._currentline, _lex._currentcolumn);
+        //}
+        //_vm->_lasterror = SQString::Create(_ss(_vm), _compilererror, -1);
+        //CleanupAfterError();
+        //return NULL;
     }
 }
 
@@ -3544,11 +3580,11 @@ void CodegenVisitor::visitTerminateStatement(TerminateStatement *terminator) {
 }
 
 void CodegenVisitor::visitReturnStatement(ReturnStatement *retStmt) {
-    if (retStmt->isLambdaReturn()) {
-        Expr *body = retStmt->argument();
-        assert(body && body->linePos() != -1);
-        _fs->AddLineInfos(body->linePos(), _lineinfo, true);
-    }
+    //if (retStmt->isLambdaReturn()) {
+    //    Expr *body = retStmt->argument();
+    //    assert(body && body->linePos() != -1);
+    //    _fs->AddLineInfos(body->linePos(), _lineinfo, true);
+    //}
 
     SQInteger retexp = _fs->GetCurrentPos() + 1;
     visitTerminateStatement(retStmt);
@@ -3761,7 +3797,6 @@ void CodegenVisitor::visitFunctionDecl(FunctionDecl *func) {
     }
     func->body()->visit(*this);
     funcstate->AddLineInfos(body->endLine(), _lineinfo, true);
-    // funcstate->AddLineInfos(_lex._prevtoken == _SC('\n')?_lex._lasttokenline:_lex._currentline, _lineinfo, true);
     SQInstruction &i = funcstate->GetInstruction(funcstate->GetCurrentPos());
     funcstate->AddInstruction(_OP_RETURN, -1);
 
@@ -3776,7 +3811,6 @@ void CodegenVisitor::visitFunctionDecl(FunctionDecl *func) {
     _fs->PopChildState();
 
     _fs->AddInstruction(_OP_CLOSURE, _fs->PushTarget(), _fs->_functions.size() - 1, 0);
-
 }
 
 SQTable* CodegenVisitor::GetScopedConstsTable()
@@ -3983,6 +4017,22 @@ void CodegenVisitor::emitDelete(Expr *argument) {
     _donot_get = true;
     argument->visit(*this);
     _donot_get = old_dng;
+
+    switch (argument->op())
+    {
+    case TO_GETFIELD:
+    case TO_GETTABLE: break;
+    case TO_BASE:
+        error(_SC("can't delete 'base'"));
+        break;
+    case TO_ID:
+        error(_SC("cannot delete an (outer) local"));
+        break;
+    default:
+        error(_SC("can't delete an expression"));
+        break;
+    }
+
     SQInteger table = _fs->PopTarget(); //src in OP_GET
     SQInteger key = _fs->PopTarget(); //key in OP_GET
     _fs->AddInstruction(_OP_DELETE, _fs->PushTarget(), key, table);
@@ -3990,6 +4040,10 @@ void CodegenVisitor::emitDelete(Expr *argument) {
 
 void CodegenVisitor::visitUnExpr(UnExpr *unary) {
     maybeAddInExprLine(unary);
+
+    if (_fs->_targetstack.size() == 0)
+        error(_SC("cannot evaluate unary-op"));
+
     switch (unary->op())
     {
     case TO_NEG: emitUnaryOp(_OP_NEG, unary->argument()); break;
@@ -4032,6 +4086,8 @@ void CodegenVisitor::emitJpmArith(SQOpcode op, Expr *lhs, Expr *rhs) {
     _fs->SetInstructionParam(jpos, 1, (_fs->GetCurrentPos() - jpos));
     _fs->SnoozeOpt();
 }
+
+//void 
 
 void CodegenVisitor::emitCompoundArith(SQOpcode op, SQInteger opcode, Expr *lvalue, Expr *rvalue) {
 
@@ -4084,6 +4140,42 @@ void CodegenVisitor::emitCompoundArith(SQOpcode op, SQInteger opcode, Expr *lval
     }
 }
 
+bool CodegenVisitor::isLValue(Expr *expr) {
+    switch (expr->op())
+    {
+    case TO_GETFIELD:
+    case TO_GETTABLE: return true;
+    case TO_ID:
+        return !expr->asId()->isBinding();
+    default:
+        return false;
+    }
+}
+
+void CodegenVisitor::checkIfAssiagnable(BinExpr *expr) {
+    Expr *lvalue = expr->lhs();
+    switch (lvalue->op())
+    {
+    case TO_GETFIELD:
+    case TO_GETTABLE: break;
+    case TO_BASE:
+        error(_SC("'base' cannot be modified"));
+        break;
+    case TO_ID:
+        if (lvalue->asId()->isBinding() && expr->op() != TO_INEXPR_ASSIGN) {
+            error(_SC("can't assign to binding (probably declaring using 'local' was intended, but 'let' was used)"));
+        }
+        break;
+    default:
+        error(_SC("can't assign to expression"));
+        break;
+    }
+
+    if (expr->op() == TO_NEWSLOT) {
+
+    }
+}
+
 void CodegenVisitor::emitNewSlot(Expr *lvalue, Expr *rvalue) {
     bool old_dng = _donot_get;
     _donot_get = true;
@@ -4098,7 +4190,7 @@ void CodegenVisitor::emitNewSlot(Expr *lvalue, Expr *rvalue) {
         _fs->AddInstruction(_OP_NEWSLOT, _fs->PushTarget(), src, key, val);
     }
     else {
-        _compiler.Error(_SC("can't 'create' a local slot"));
+        error(_SC("can't 'create' a local slot"));
     }
 }
 
@@ -4240,13 +4332,13 @@ void CodegenVisitor::visitBinExpr(BinExpr *expr) {
     case TO_NULLC: emitJpmArith(_OP_NULLCOALESCE, expr->lhs(), expr->rhs()); break;
     case TO_OROR: emitJpmArith(_OP_OR, expr->lhs(), expr->rhs()); break;
     case TO_ANDAND: emitJpmArith(_OP_AND, expr->lhs(), expr->rhs()); break;
-    case TO_INEXPR_ASSIGN: emitAssign(expr->lhs(), expr->rhs(), true); break;
-    case TO_ASSIGN: emitAssign(expr->lhs(), expr->rhs(), false); break;
-    case TO_PLUSEQ:  emitCompoundArith(_OP_ADD, '+', expr->lhs(), expr->rhs()); break;
-    case TO_MINUSEQ: emitCompoundArith(_OP_SUB, '-', expr->lhs(), expr->rhs()); break;
-    case TO_MULEQ:   emitCompoundArith(_OP_MUL, '*', expr->lhs(), expr->rhs()); break;
-    case TO_DIVEQ:   emitCompoundArith(_OP_DIV, '/', expr->lhs(), expr->rhs()); break;
-    case TO_MODEQ:   emitCompoundArith(_OP_MOD, '%', expr->lhs(), expr->rhs()); break;
+    case TO_INEXPR_ASSIGN: checkIfAssiagnable(expr);  emitAssign(expr->lhs(), expr->rhs(), true); break;
+    case TO_ASSIGN: checkIfAssiagnable(expr); emitAssign(expr->lhs(), expr->rhs(), false); break;
+    case TO_PLUSEQ:  checkIfAssiagnable(expr); emitCompoundArith(_OP_ADD, '+', expr->lhs(), expr->rhs()); break;
+    case TO_MINUSEQ: checkIfAssiagnable(expr); emitCompoundArith(_OP_SUB, '-', expr->lhs(), expr->rhs()); break;
+    case TO_MULEQ:   checkIfAssiagnable(expr); emitCompoundArith(_OP_MUL, '*', expr->lhs(), expr->rhs()); break;
+    case TO_DIVEQ:   checkIfAssiagnable(expr); emitCompoundArith(_OP_DIV, '/', expr->lhs(), expr->rhs()); break;
+    case TO_MODEQ:   checkIfAssiagnable(expr); emitCompoundArith(_OP_MOD, '%', expr->lhs(), expr->rhs()); break;
     case TO_ADD: emitSimpleBin(_OP_ADD, expr->lhs(), expr->rhs()); break;
     case TO_SUB: emitSimpleBin(_OP_SUB, expr->lhs(), expr->rhs()); break;
     case TO_MUL: emitSimpleBin(_OP_MUL, expr->lhs(), expr->rhs()); break;
@@ -4304,6 +4396,10 @@ void CodegenVisitor::visitIncExpr(IncExpr *expr) {
     _donot_get = true;
     arg->visit(*this);
     _donot_get = old_dng;
+
+    if (!isLValue(arg)) {
+        error(_SC("argument of inc/dec operation is not assiangable"));
+    }
 
     bool isPostfix = expr->form() == IF_POSTFIX;
 
@@ -4382,6 +4478,7 @@ void CodegenVisitor::visitId(Id *id) {
 
     if ((pos = _fs->GetLocalVariable(idObj, assignable)) != -1) {
         _fs->PushTarget(pos);
+        id->setAssiagnable(assignable);
     }
 
     else if ((pos = _fs->GetOuterVariable(idObj, assignable)) != -1) {
@@ -4390,12 +4487,13 @@ void CodegenVisitor::visitId(Id *id) {
             SQInteger stkPos = _fs->PushTarget();
             _fs->AddInstruction(_OP_GETOUTER, stkPos, pos);
         }
+        id->setAssiagnable(assignable);
     }
 
     else if (IsConstant(idObj, constant)) {
         /* Handle named constant */
         SQObjectPtr constval = constant;
-        //while (sq_type(constval) == OT_TABLE && (sq_objflags(constval) & SQOBJ_FLAG_IMMUTABLE) && _token == _SC('.')) {
+        //while (sq_type(constval) == OT_TABLE && (sq_objflags(constval) & SQOBJ_FLAG_IMMUTABLE) && _token == _SC('.')) { <<=???
         //    Expect('.');
         //    SQObject constid = Expect(TK_IDENTIFIER);
         //    if (!_table(constval)->Get(constid, constval)) {

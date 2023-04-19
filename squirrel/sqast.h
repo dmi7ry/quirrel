@@ -155,7 +155,7 @@ enum IdType : SQInteger {
 
 class Id : public Expr {
 public:
-    Id(const SQChar *id) : Expr(TO_ID), _id(id), _outpos(ID_LOCAL) { 
+    Id(const SQChar *id) : Expr(TO_ID), _id(id), _outpos(ID_LOCAL), _assignable(false) {
         _id = strdup(id); // TODO
     }
 
@@ -174,11 +174,15 @@ public:
     void setConst() { _outpos = ID_CONST; }
 
     SQInteger outerPos() const { return _outpos; }
+    void setAssiagnable(bool v) { _assignable = v; }
+    bool isAssignable() const { return _assignable; }
+    bool isBinding() const { return (isOuter() || isLocal()) && isAssignable(); }
 
 
 //private:
     const SQChar *_id;
     SQInteger _outpos;
+    bool _assignable;
 };
 
 class UnExpr : public Expr {
