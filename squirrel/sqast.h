@@ -69,8 +69,6 @@
     DEF_TREE_OP(SETFIELD), \
     DEF_TREE_OP(GETTABLE), \
     DEF_TREE_OP(SETTABLE), \
-    DEF_TREE_OP(PINC), \
-    DEF_TREE_OP(PDEC), \
     DEF_TREE_OP(CALL), \
     DEF_TREE_OP(TERNARY), \
     DEF_TREE_OP(INEXPR_ASSIGN), \
@@ -106,7 +104,7 @@ class Id;
 class GetFieldExpr;
 class GetTableExpr;
 
-class Node {
+class Node : public ArenaObj {
 protected:
     Node(enum TreeOp op): _op(op), _linepos(-1) {}
 public:
@@ -155,9 +153,7 @@ enum IdType : SQInteger {
 
 class Id : public Expr {
 public:
-    Id(const SQChar *id) : Expr(TO_ID), _id(id), _outpos(ID_LOCAL), _assignable(false) {
-        _id = strdup(id); // TODO
-    }
+    Id(const SQChar *id) : Expr(TO_ID), _id(id), _outpos(ID_LOCAL), _assignable(false) {}
 
     void visit(Visitor &visitor);
     void visitChildren(Visitor &visitor);
@@ -303,16 +299,16 @@ class GetTableExpr : public TableAccessExpr {
 public:
     GetTableExpr(Expr *receiver, Expr *key, bool nullable): TableAccessExpr(TO_GETTABLE, receiver, key, nullable) { }
 
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    void visit(Visitor &visitor);
+    void visitChildren(Visitor &visitor);
 };
 
 class SetTableExpr : public TableAccessExpr {
 public:
     SetTableExpr(Expr *receiver, Expr *key, Expr *val, bool nullable): TableAccessExpr(TO_SETTABLE, receiver, key, nullable), _val(val) { }
 
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    void visit(Visitor &visitor);
+    void visitChildren(Visitor &visitor);
 
     Expr *value() const { return _val; }
 private:
@@ -368,13 +364,7 @@ class LiteralExpr : public Expr {
 public:
 
     LiteralExpr() : Expr(TO_LITERAL), _kind(LK_NULL) {}
-    LiteralExpr(const SQChar *s) : Expr(TO_LITERAL), _kind(LK_STRING) { 
-        size_t l = strlen(s);
-        SQChar *dst = new SQChar[l + 1];
-        // TODO
-        memcpy(dst, s, (l + 1) * sizeof (SQChar));
-        _v.s = dst;
-    }
+    LiteralExpr(const SQChar *s) : Expr(TO_LITERAL), _kind(LK_STRING) { _v.s = s; }
     LiteralExpr(SQFloat f) : Expr(TO_LITERAL), _kind(LK_FLOAT) { _v.f = f; }
     LiteralExpr(SQInteger i) : Expr(TO_LITERAL), _kind(LK_INT) { _v.i = i; }
     LiteralExpr(bool i) : Expr(TO_LITERAL), _kind(LK_BOOL) { _v.i = i; }
@@ -389,6 +379,7 @@ public:
     bool b() const { assert(_kind == LK_BOOL); return _v.b; }
     const SQChar *s() const { assert(_kind == LK_STRING); return _v.s; }
     void *null() const { assert(_kind == LK_NULL); return nullptr; }
+    SQUnsignedInteger raw() const { return _v.raw; }
 
 private:
     enum LiteralKind _kind;
@@ -397,6 +388,7 @@ private:
         SQInteger i;
         SQFloat f;
         bool b;
+        SQUnsignedInteger raw;
     } _v;
 
 };
@@ -417,7 +409,7 @@ public:
     SQInteger diff() const { return _diff; }
     Expr *argument() const { return _arg; }
 
-//private:
+private:
     enum IncForm _form;
     SQInteger _diff;
     Expr *_arg;
@@ -431,13 +423,16 @@ public:
 
     void visit(Visitor &visitor) override;
     void visitChildren(Visitor &visitor) override;
-//private:
+
+    Decl *declaration() const { return _decl; }
+
+private:
     Decl *_decl;
 };
 
 class CallExpr : public Expr {
 public:
-    CallExpr(SQAllocContext ctx, Expr *callee, bool nullable) : Expr(TO_CALL), _callee(callee), _args(ctx), _nullable(nullable) {}
+    CallExpr(Arena *arena, Expr *callee, bool nullable) : Expr(TO_CALL), _callee(callee), _args(arena), _nullable(nullable) {}
 
     void addArgument(Expr *arg) { _args.push_back(arg); }
 
@@ -449,7 +444,7 @@ public:
     const sqvector<Expr *> &arguments() const { return _args; }
     sqvector<Expr *> &arguments() { return _args; }
 
-//private:
+private:
     Expr *_callee;
     sqvector<Expr *> _args;
     bool _nullable;
@@ -457,7 +452,7 @@ public:
 
 class ArrayExpr : public Expr {
 public:
-    ArrayExpr(SQAllocContext ctx) : Expr(TO_ARRAYEXPR), _inits(ctx) {}
+    ArrayExpr(Arena *arena) : Expr(TO_ARRAYEXPR), _inits(arena) {}
 
     void addValue(Expr *v) { _inits.push_back(v); }
 
@@ -466,20 +461,22 @@ public:
 
     const sqvector<Expr *> &initialziers() const { return _inits; }
 
-//private:
+private:
     sqvector<Expr *> _inits;
 };
 
 class CommaExpr : public Expr {
 public:
-    CommaExpr(SQAllocContext ctx) : Expr(TO_COMMA), _exprs(ctx) {}
+    CommaExpr(Arena *arena) : Expr(TO_COMMA), _exprs(arena) {}
 
     void addExpression(Expr *expr) { _exprs.push_back(expr); }
 
     void visit(Visitor &visitor) override;
     void visitChildren(Visitor &visitor) override;
 
-//private:
+    const sqvector<Expr *> &expressions() const { return _exprs; }
+
+private:
     sqvector<Expr *> _exprs;
 };
 
@@ -558,7 +555,7 @@ struct TableMember {
 
 class TableDecl : public Decl {
 public:
-    TableDecl(SQAllocContext ctx) : Decl(TO_TABLE), _members(ctx) {}
+    TableDecl(Arena *arena) : Decl(TO_TABLE), _members(arena) {}
 
     void addMember(Expr *key, Node *value, bool isStatic = false) { _members.push_back({ key, value, isStatic }); }
 
@@ -569,15 +566,14 @@ public:
     const sqvector<TableMember> &members() const { return _members; }
 
 protected:
-    TableDecl(SQAllocContext ctx, enum TreeOp op) : Decl(op), _members(ctx) {}
-//private:
-public:
+    TableDecl(Arena *arena, enum TreeOp op) : Decl(op), _members(arena) {}
+private:
     sqvector<TableMember> _members;
 };
 
 class ClassDecl : public TableDecl {
 public:
-    ClassDecl(SQAllocContext ctx, Expr *key, Expr *base) : TableDecl(ctx, TO_CLASS), _key(key), _base(base) {}
+    ClassDecl(Arena *arena, Expr *key, Expr *base) : TableDecl(arena, TO_CLASS), _key(key), _base(base) {}
 
     void visit(Visitor &visitor) override;
     void visitChildren(Visitor &visitor) override;
@@ -585,7 +581,7 @@ public:
     Expr *classBase() const { return _base; }
     Expr* classKey() const { return _key; }
 
-//private:
+private:
     Expr *_key;
     Expr *_base;
 
@@ -593,11 +589,11 @@ public:
 
 class FunctionDecl : public Decl {
 protected:
-    FunctionDecl(enum TreeOp op, SQAllocContext ctx, Id *name) : Decl(op), _parameters(ctx), _name(name), _vararg(false) {}
+    FunctionDecl(enum TreeOp op, Arena *arena, Id *name) : Decl(op), _arena(arena), _parameters(arena), _name(name), _vararg(false) {}
 public:
-    FunctionDecl(SQAllocContext ctx, Id *name) : Decl(TO_FUNCTION), _parameters(ctx), _name(name), _vararg(false) {}
+    FunctionDecl(Arena *arena, Id *name) : Decl(TO_FUNCTION), _arena(arena), _parameters(arena), _name(name), _vararg(false) {}
 
-    void addParameter(Id *name, Expr *defaultVal = NULL) { _parameters.push_back(new ParamDecl(name, defaultVal)); }
+    void addParameter(Id *name, Expr *defaultVal = NULL) { _parameters.push_back(new (_arena) ParamDecl(name, defaultVal)); }
     
     sqvector<ParamDecl *> &parameters() { return _parameters; }
     const sqvector<ParamDecl *> &parameters() const { return _parameters; }
@@ -617,6 +613,7 @@ public:
 
 
 //private:
+    Arena *_arena;
     Id *_name;
     sqvector<ParamDecl *> _parameters;
     Statement * _body;
@@ -628,7 +625,7 @@ public:
 
 class ConstructorDecl : public FunctionDecl {
 public:
-    ConstructorDecl(SQAllocContext ctx, Id *name) : FunctionDecl(TO_CONSTRUCTOR, ctx, name) {}
+    ConstructorDecl(Arena *arena, Id *name) : FunctionDecl(TO_CONSTRUCTOR, arena, name) {}
 
     void visit(Visitor &visitor) override;
 };
@@ -640,7 +637,7 @@ struct EnumConst {
 
 class EnumDecl : public Decl {
 public:
-    EnumDecl(SQAllocContext ctx, Id *id, bool global) : Decl(TO_ENUM), _id(id), _consts(ctx), _global(global) {}
+    EnumDecl(Arena *arena, Id *id, bool global) : Decl(TO_ENUM), _id(id), _consts(arena), _global(global) {}
 
     void addConst(Id *id, LiteralExpr *val) { _consts.push_back({ id, val }); }
 
@@ -678,9 +675,9 @@ public:
 
 class DeclGroup : public Decl {
 protected:
-    DeclGroup(SQAllocContext ctx, enum TreeOp op) : Decl(op), _decls(ctx) {}
+    DeclGroup(Arena *arena, enum TreeOp op) : Decl(op), _decls(arena) {}
 public:
-    DeclGroup(SQAllocContext ctx) : Decl(TO_DECL_GROUP), _decls(ctx) {}
+    DeclGroup(Arena *arena) : Decl(TO_DECL_GROUP), _decls(arena) {}
 
     void addDeclaration(VarDecl *d) { _decls.push_back(d); }
 
@@ -701,7 +698,7 @@ enum DestructuringType {
 
 class DesctructionDecl : public DeclGroup {
 public:
-    DesctructionDecl(SQAllocContext ctx, enum DestructuringType dt) : DeclGroup(ctx, TO_DESTRUCT), _dt_type(dt) {}
+    DesctructionDecl(Arena *arena, enum DestructuringType dt) : DeclGroup(arena, TO_DESTRUCT), _dt_type(dt) {}
 
     void visit(Visitor &visitor) override;
     void visitChildren(Visitor &visitor) override;
@@ -718,9 +715,9 @@ public:
 
 class Block : public Statement {
 public:
-    Block(SQAllocContext ctx, bool is_root = false) : Statement(TO_BLOCK), _statements(ctx), _is_root(is_root), _endLine(-1) {}
+    Block(Arena *arena, bool is_root = false) : Statement(TO_BLOCK), _statements(arena), _is_root(is_root), _endLine(-1) {}
 
-    void addStatement(Statement *stmt) { _statements.push_back(stmt); }
+    void addStatement(Statement *stmt) { assert(stmt); _statements.push_back(stmt); }
 
     sqvector<Statement *> &statements() { return _statements; }
     const sqvector<Statement *> &statements() const { return _statements; }
@@ -743,7 +740,7 @@ private:
 
 class RootBlock : public Block {
 public:
-    RootBlock(SQAllocContext ctx) : Block(ctx, true) {}
+    RootBlock(Arena *arena) : Block(arena, true) {}
 
 
 };
@@ -846,7 +843,7 @@ struct SwitchCase {
 
 class SwitchStatement : public Statement {
 public:
-    SwitchStatement(SQAllocContext ctx, Expr *expr) : Statement(TO_SWITCH), _expr(expr), _cases(ctx) {}
+    SwitchStatement(Arena *arena, Expr *expr) : Statement(TO_SWITCH), _expr(expr), _cases(arena) {}
 
     void addCases(Expr *val, Statement *stmt) { _cases.push_back({ val, stmt }); }
 

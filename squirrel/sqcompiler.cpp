@@ -27,16 +27,6 @@
 #define LOCAL  4
 #define OUTER  5
 
-struct SQExpState {
-  SQInteger  etype;       /* expr. type; one of EXPR, OBJECT, BASE, OUTER or LOCAL */
-  SQInteger  epos;        /* expr. location on stack; -1 for OBJECT and BASE */
-  bool       donot_get;   /* signal not to deref the next value */
-  bool       is_assignable_var; // for LOCAL and OUTER
-  bool       literal_field;
-
-  bool isBinding() { return (etype==LOCAL || etype==OUTER) && !is_assignable_var; }
-};
-
 #ifndef SQ_LINE_INFO_IN_STRUCTURES
 #  define SQ_LINE_INFO_IN_STRUCTURES 1
 #endif
@@ -98,8 +88,6 @@ class RenderVisitor : public Visitor {
         case TO_RESUME: return "RESUME ";
         case TO_CLONE: return "CLONE ";
         case TO_DELETE: return "DELETE ";
-        case TO_PINC: return "++";
-        case TO_PDEC: return "--";
         case TO_INEXPR_ASSIGN: return ":=";
         case TO_NEWSLOT: return " <- ";
         case TO_PLUSEQ: return " += ";
@@ -120,6 +108,11 @@ public:
 
     std::ostream &_out;
     SQInteger _indent;
+
+    void render(Node *n) {
+        n->visit(*this);
+        _out << std::endl;
+    }
 
     virtual void visitUnExpr(UnExpr *expr) {
         if (expr->op() == TO_PAREN) {
@@ -146,11 +139,11 @@ public:
         expr->c()->visit(*this);
     }
     virtual void visitCallExpr(CallExpr *expr) { 
-        expr->_callee->visit(*this);
+        expr->callee()->visit(*this);
         _out << "(";
-        for (int i = 0; i < expr->_args.size(); ++i) {
+        for (int i = 0; i < expr->arguments().size(); ++i) {
             if (i) _out << ", ";
-            expr->_args[i]->visit(*this);
+            expr->arguments()[i]->visit(*this);
         }
         _out << ")";
 
@@ -205,26 +198,26 @@ public:
     }
     virtual void visitIncExpr(IncExpr *expr) { 
 
-        const char *op = expr->_diff < 0 ? "--" : "++";
+        const char *op = expr->diff() < 0 ? "--" : "++";
 
         if (expr->form() == IF_PREFIX) _out << op;
-        expr->_arg->visit(*this);
+        expr->argument()->visit(*this);
         if (expr->form() == IF_POSTFIX) _out << op;
     }
 
     virtual void visitArrayExpr(ArrayExpr *expr) { 
         _out << "[";
-        for (int i = 0; i < expr->_inits.size(); ++i) {
+        for (int i = 0; i < expr->initialziers().size(); ++i) {
             if (i) _out << ", ";
-            expr->_inits[i]->visit(*this);
+            expr->initialziers()[i]->visit(*this);
         }
         _out << "]";
     }
 
     virtual void visitCommaExpr(CommaExpr *expr) { 
-        for (int i = 0; i < expr->_exprs.size(); ++i) {
+        for (int i = 0; i < expr->expressions().size(); ++i) {
             if (i) _out << ", ";
-            expr->_exprs[i]->visit(*this);
+            expr->expressions()[i]->visit(*this);
         }
     }
 
@@ -239,7 +232,8 @@ public:
         const sqvector<Statement *> &stmts = block->statements();
         for (int i = 0; i < stmts.size(); ++i) {
             indent(_indent);
-            stmts[i]->visit(*this);
+            Statement *stmt = stmts[i];
+            stmt->visit(*this);
             _out << std::endl;
         }
         indent(cur);
@@ -362,18 +356,17 @@ public:
         _indent -= 2;
     }
     virtual void visitTryStatement(TryStatement *tr) {
-        _out << "TRY" << std::endl;
-        _indent += 2;
-        indent(_indent);
+        _out << "TRY ";
+        //_indent += 2;
         tr->_tryStmt->visit(*this);
         _out << std::endl;
+        indent(_indent);
         _out << "CATCH (";
         visitId(tr->_exception);
-        _out << ")";
-        indent(_indent);
+        _out << ") ";
         tr->_catchStmt->visit(*this);
         _out << std::endl;
-        indent(_indent -= 2);
+        indent(_indent);
         _out << "END_TRY";
     }
     virtual void visitTerminateStatement(TerminateStatement *term) { if (term->_arg) term->_arg->visit(*this); }
@@ -407,8 +400,8 @@ public:
     virtual void visitTableDecl(TableDecl *tbl) { 
         _out << "{" << std::endl;
         _indent += 2;
-        for (int i = 0; i < tbl->_members.size(); ++i) {
-            TableMember &m = tbl->_members[i];
+        for (int i = 0; i < tbl->members().size(); ++i) {
+            TableMember &m = tbl->members()[i];
             indent(_indent);
             if (m.isStatic) _out << "STATIC ";
             m.key->visit(*this);
@@ -537,36 +530,47 @@ public:
                     _fs->_blockstacksizes.pop_back(); }
 
 
-class SQCompiler;
-
 class CodegenVisitor : public Visitor {
 
     SQFuncState *_fs;
     SQFuncState *_funcState;
-    SQCompiler &_compiler;
-    SQVM &_vm;
+    SQVM *_vm;
 
     SQScope _scope;
     SQObjectPtrVec _scopedconsts;
-    SQInteger _stacksize;
-
-    SQObjectPtr &_o;
 
     bool _donot_get;
 
     SQInteger _num_initial_bindings;
+    SQInteger _lang_features;
 
     bool _lineinfo;
+    bool _raiseerror;
+    const SQChar *_sourceName;
 
     jmp_buf _errorjmp;
+
+    Arena *_arena;
+
+    SQChar _compilererror[MAX_COMPILER_ERROR_LEN];
+
+    SQInteger _last_pop = -1;
+
 public:
-    CodegenVisitor(SQAllocContext ctx, SQFuncState &root_fs, const HSQOBJECT *bindings, SQCompiler &compiler, SQVM *vm, SQObjectPtr sourceName, SQObjectPtr &o);
+    CodegenVisitor(Arena *arena, const HSQOBJECT *bindings, SQVM *vm, const SQChar *sourceName, SQInteger lang_fuatures, bool lineinfo, bool raiseerror);
 
-    void generate(RootBlock *root);
+    void generate(RootBlock *root, SQObjectPtr &out);
 
-    void finish(RootBlock *root);
+    static void ThrowError(void *ud, const SQChar *s) {
+        CodegenVisitor *c = (CodegenVisitor *)ud;
+        c->error(s);
+    }
 
+private:
     void error(const SQChar *s, ...);
+
+    void CheckDuplicateLocalIdentifier(SQObject name, const SQChar *desc, bool ignore_global_consts);
+    bool CheckMemberUniqueness(sqvector<Expr *> &vec, Expr *obj);
 
     void Emit2ArgsOP(SQOpcode op, SQInteger p3 = 0);
 
@@ -578,6 +582,54 @@ public:
     void ResolveContinues(SQFuncState *funcstate, SQInteger ntoresolve, SQInteger targetpos);
 
     void EmitDerefOp(SQOpcode op);
+
+    void generateTableDecl(TableDecl *tableDecl);
+
+    void checkClassKey(Expr *key);
+
+    SQTable* GetScopedConstsTable();
+
+    void emitUnaryOp(SQOpcode op, Expr *arg);
+
+    void emitDelete(Expr *argument);
+
+    void emitSimpleBin(SQOpcode op, Expr *lhs, Expr *rhs, SQInteger op3 = 0);
+
+    void emitJpmArith(SQOpcode op, Expr *lhs, Expr *rhs);
+
+    void emitCompoundArith(SQOpcode op, SQInteger opcode, Expr *lvalue, Expr *rvalue);
+
+    void checkIfAssiagnable(BinExpr *expr);
+
+    bool isLValue(Expr *expr);
+
+    void emitNewSlot(Expr *lvalue, Expr *rvalue);
+
+    void emitAssign(Expr *lvalue, Expr * rvalue, bool inExpr);
+
+    void emitFieldAssign(bool isLiteral);
+
+    bool CanBeDefaultDelegate(const SQChar *key);
+
+    bool canBeLiteral(AccessExpr *expr);
+
+    void MoveIfCurrentTargetIsLocal();
+
+    bool IsConstant(const SQObject &name, SQObject &e);
+
+    bool IsLocalConstant(const SQObject &name, SQObject &e);
+
+    bool IsGlobalConstant(const SQObject &name, SQObject &e);
+
+    SQObject selectLiteral(LiteralExpr *lit);
+
+    void maybeAddInExprLine(Expr *expr);
+
+    void addLineNumber(Statement *stmt);
+
+    void visitNoGet(Node *n);
+
+public:
 
     void visitBlock(Block *block) override;
 
@@ -609,15 +661,11 @@ public:
 
     void visitExprStatement(ExprStatement *stmt) override;
 
-    void generateTableDecl(TableDecl *tableDecl);
-
     void visitTableDecl(TableDecl *tableDecl) override;
 
     void visitClassDecl(ClassDecl *klass) override;
 
     void visitParamDecl(ParamDecl *param) override;
-
-    SQInteger _last_pop = -1;
 
     void visitVarDecl(VarDecl *var) override;
 
@@ -627,13 +675,9 @@ public:
 
     void visitFunctionDecl(FunctionDecl *func) override;
 
-    SQTable* GetScopedConstsTable();
-
     void visitConstDecl(ConstDecl *decl) override;
 
     void visitEnumDecl(EnumDecl *enums) override;
-
-    void MoveIfCurrentTargetIsLocal();
 
     void visitCallExpr(CallExpr *call) override;
 
@@ -649,31 +693,7 @@ public:
 
     void visitArrayExpr(ArrayExpr *expr) override;
 
-    void emitUnaryOp(SQOpcode op, Expr *arg);
-
-    void emitDelete(Expr *argument);
-
     void visitUnExpr(UnExpr *unary) override;
-
-    void emitSimpleBin(SQOpcode op, Expr *lhs, Expr *rhs, SQInteger op3 = 0);
-
-    void emitJpmArith(SQOpcode op, Expr *lhs, Expr *rhs);
-
-    void emitCompoundArith(SQOpcode op, SQInteger opcode, Expr *lvalue, Expr *rvalue);
-
-    void checkIfAssiagnable(BinExpr *expr);
-
-    bool isLValue(Expr *expr);
-
-    void emitNewSlot(Expr *lvalue, Expr *rvalue);
-
-    void emitAssign(Expr *lvalue, Expr * rvalue, bool inExpr);
-
-    void emitFieldAssign(bool isLiteral);
-
-    bool CanBeDefaultDelegate(const SQChar *key);
-
-    bool canBeLiteral(AccessExpr *expr);
 
     void visitGetFieldExpr(GetFieldExpr *expr) override;
 
@@ -685,94 +705,58 @@ public:
 
     void visitIncExpr(IncExpr *expr) override;
 
-    bool IsConstant(const SQObject &name, SQObject &e);
-
-    bool IsLocalConstant(const SQObject &name, SQObject &e);
-
-    bool IsGlobalConstant(const SQObject &name, SQObject &e);
-
     void visitId(Id *id) override;
 
-    SQObject selectLiteral(LiteralExpr *lit);
-
-    void maybeAddInExprLine(Expr *expr);
-
-    void addLineNumber(Statement *stmt);
-
+    void visitCommaExpr(CommaExpr *expr) override;
 
 };
 
-class SQCompiler
+class SQParser
 {
-public:
 
-    const SQChar *_rawsourcename;
+    Arena *_astArena;
+
+    template<typename N, typename ... Args>
+    N *newNode(Args... args) {
+        return new (arena()) N(args...);
+    }
+
+    SQChar *copyString(const SQChar *s) {
+        size_t len = scstrlen(s);
+        size_t memLen = (len + 1) * sizeof(SQChar);
+        SQChar *buf = (SQChar *)arena()->allocate(memLen);
+        memcpy(buf, s, memLen);
+        return buf;
+    }
+
+    Id *newId(const SQChar *name) {
+        return newNode<Id>(copyString(name));
+    }
+
+    LiteralExpr *newStringLiteral(const SQChar *s) {
+        return newNode<LiteralExpr>(copyString(s));
+    }
+
+    Arena *arena() { return _astArena; }
+
+public:
 
     bool lineInfo() { return _lineinfo; }
 
-    SQCompiler(SQVM *v, SQLEXREADFUNC rg, SQUserPointer up, const HSQOBJECT *bindings, const SQChar* sourcename, bool raiseerror, bool lineinfo) :
+    SQParser(SQVM *v, SQLEXREADFUNC rg, SQUserPointer up, const SQChar* sourcename, Arena *astArena, bool raiseerror, bool lineinfo) :
       _lex(_ss(v)),
-      _scopedconsts(_ss(v)->_alloc_ctx),
-      _member_constant_keys_check(_ss(v)->_alloc_ctx)
+      _astArena(astArena)
     {
         _vm=v;
         _lex.Init(_ss(v), rg, up,ThrowError,this);
-        _rawsourcename = sourcename;
-        _sourcename = SQString::Create(_ss(v), sourcename);
+        _sourcename = sourcename;
         _lineinfo = lineinfo;_raiseerror = raiseerror;
-        _scope.outers = 0;
-        _scope.stacksize = 0;
         _compilererror[0] = _SC('\0');
         _expression_context = SQE_REGULAR;
-        _num_initial_bindings = 0;
-
-        if (bindings) {
-            assert(sq_type(*bindings)==OT_TABLE || sq_type(*bindings)==OT_NULL);
-            if (sq_type(*bindings)==OT_TABLE) {
-                _scopedconsts.push_back(*bindings);
-                _num_initial_bindings = 1;
-            }
-        }
-    }
-
-    SQObjectPtrVec scopedconsts() { return _scopedconsts; }
-
-    bool IsConstant(const SQObject &name,SQObject &e)
-    {
-        if (IsLocalConstant(name, e))
-            return true;
-        if (IsGlobalConstant(name, e))
-            return true;
-        return false;
-    }
-
-    bool IsLocalConstant(const SQObject &name,SQObject &e)
-    {
-        SQObjectPtr val;
-        for (SQInteger i=SQInteger(_scopedconsts.size())-1; i>=0; --i) {
-            SQObjectPtr &tbl = _scopedconsts[i];
-            if (!sq_isnull(tbl) && _table(tbl)->Get(name,val)) {
-                e = val;
-                if (tbl._flags & SQOBJ_FLAG_IMMUTABLE)
-                    e._flags |= SQOBJ_FLAG_IMMUTABLE;
-                return true;
-            }
-        }
-        return false;
-    }
-
-    bool IsGlobalConstant(const SQObject &name,SQObject &e)
-    {
-        SQObjectPtr val;
-        if(_table(_ss(_vm)->_consts)->Get(name,val)) {
-            e = val;
-            return true;
-        }
-        return false;
     }
 
     static void ThrowError(void *ud, const SQChar *s) {
-        SQCompiler *c = (SQCompiler *)ud;
+        SQParser *c = (SQParser *)ud;
         c->Error(s);
     }
     void Error(const SQChar *s, ...)
@@ -851,7 +835,7 @@ public:
         else
             Error(_SC("unsupported directive"));
 
-        _lang_features = _fs->lang_features = (_fs->lang_features | setFlags) & ~clearFlags;
+        _lang_features = (_lang_features | setFlags) & ~clearFlags;
         if (applyToDefault)
             _ss(_vm)->defaultLangFeatures = (_ss(_vm)->defaultLangFeatures | setFlags) & ~clearFlags;
     }
@@ -869,10 +853,13 @@ public:
         }
     }
 
+    void Consume(SQInteger tok) {
+        assert(tok == _token);
+        Lex();
+    }
 
-    SQObject Expect(SQInteger tok, Expr **r = NULL)
+    Expr *Expect(SQInteger tok)
     {
-
         if(_token != tok) {
             if(_token == TK_CONSTRUCTOR && tok == TK_IDENTIFIER) {
                 //do nothing
@@ -902,28 +889,20 @@ public:
                 Error(_SC("expected '%c'"), tok);
             }
         }
-        SQObjectPtr ret;
+        Expr *ret = NULL;
         switch(tok)
         {
         case TK_IDENTIFIER:
-            ret = _fs->CreateString(_lex._svalue);
-            assert(r);
-            *r = new Id(_lex._svalue);
+            ret = newId(_lex._svalue);
             break;
         case TK_STRING_LITERAL:
-            ret = _fs->CreateString(_lex._svalue,_lex._longstr.size()-1);
-            assert(r);
-            *r = new LiteralExpr(_lex._svalue);
+            ret = newStringLiteral(_lex._svalue);
             break;
         case TK_INTEGER:
-            ret = SQObjectPtr(_lex._nvalue);
-            assert(r);
-            *r = new LiteralExpr(_lex._nvalue);
+            ret = newNode<LiteralExpr>(_lex._nvalue);
             break;
         case TK_FLOAT:
-            ret = SQObjectPtr(_lex._fvalue);
-            assert(r);
-            *r = new LiteralExpr(_lex._fvalue);
+            ret = newNode<LiteralExpr>(_lex._fvalue);
             break;
         }
         Lex();
@@ -937,31 +916,10 @@ public:
             Error(_SC("end of statement expected (; or lf)"));
         }
     }
-    void MoveIfCurrentTargetIsLocal() {
-        SQInteger trg = _fs->TopTarget();
-        if(_fs->IsLocal(trg)) {
-            trg = _fs->PopTarget(); //pops the target and moves it
-            _fs->AddInstruction(_OP_MOVE, _fs->PushTarget(), trg);
-        }
-    }
-    void CleanupAfterError() {
-        for (SQUnsignedInteger i=0, n=_member_constant_keys_check.size(); i<n; ++i)
-            delete _member_constant_keys_check[i];
-        _member_constant_keys_check.resize(0);
-    }
-    RootBlock *Compile(SQObjectPtr &o)
-    {
-        _scopedconsts.push_back();
-        SQFuncState funcstate(_ss(_vm), NULL,ThrowError,this);
-        funcstate._name = SQString::Create(_ss(_vm), _SC("__main__"));
-        _fs = &funcstate;
-        _fs->AddParameter(_fs->CreateString(_SC("this")));
-        _fs->AddParameter(_fs->CreateString(_SC("vargv")));
-        _fs->_varparams = true;
-        _fs->_sourcename = _sourcename;
-        SQInteger stacksize = _fs->GetStackSize();
 
-        RootBlock *rootBlock = new RootBlock(_ss(_vm)->_alloc_ctx);
+    RootBlock *parse()
+    {
+        RootBlock *rootBlock = newNode<RootBlock>(arena());
 
         if(setjmp(_errorjmp) == 0) {
             Lex();
@@ -970,39 +928,22 @@ public:
                 rootBlock->addStatement(parseStatement());
                 if(_lex._prevtoken != _SC('}') && _lex._prevtoken != _SC(';')) OptionalSemicolon();
             }
-            _fs->SetStackSize(stacksize);
             rootBlock->setEndLine(_lex._currentline);
-            _fs->AddLineInfos(_lex._currentline, _lineinfo, true);
-            _fs->AddInstruction(_OP_RETURN, 0xFF);
-
-            assert(_member_constant_keys_check.empty());
-
-            if (!(_fs->lang_features & LF_DISABLE_OPTIMIZER)) {
-                SQOptimizer opt(*_fs);
-                opt.optimize();
-            }
-
-            _fs->SetStackSize(0);
-            o =_fs->BuildProto();
-#ifdef _DEBUG_DUMP
-            _fs->Dump(_funcproto(o));
-#endif
         }
         else {
             if(_raiseerror && _ss(_vm)->_compilererrorhandler) {
-                _ss(_vm)->_compilererrorhandler(_vm, _compilererror, sq_type(_sourcename) == OT_STRING?_stringval(_sourcename):_SC("unknown"),
+                _ss(_vm)->_compilererrorhandler(_vm, _compilererror, _sourcename ? _sourcename : _SC("unknown"),
                     _lex._currentline, _lex._currentcolumn);
             }
             _vm->_lasterror = SQString::Create(_ss(_vm), _compilererror, -1);
-            CleanupAfterError();
             return NULL;
         }
-        assert(_scopedconsts.size() == 1 + _num_initial_bindings);
+        
         return rootBlock;
     }
-    Block *Statements()
+    Block *parseStatements()
     {
-        Block *result = new Block(_ss(_vm)->_alloc_ctx);
+        Block *result = newNode<Block>(arena());
         while(_token != _SC('}') && _token != TK_DEFAULT && _token != TK_CASE) {
             Statement *stmt = parseStatement();
             result->addStatement(stmt);
@@ -1010,13 +951,14 @@ public:
         }
         return result;
     }
+
     Statement *parseStatement(bool closeframe = true)
     {
         Statement *result = NULL;
         SQInteger line = _lex._currentline;
-        _fs->AddLineInfos(line, _lineinfo);
-        switch(_token){
-        case _SC(';'):  Lex(); result = new EmptyStatement();         break;
+        
+        switch(_token) {
+        case _SC(';'):  Lex(); result = newNode<EmptyStatement>();         break;
         case TK_IF:     result = parseIfStatement();          break;
         case TK_WHILE:      result = parseWhileStatement();       break;
         case TK_DO:     result = parseDoWhileStatement();     break;
@@ -1030,62 +972,39 @@ public:
         case TK_RETURN:
         case TK_YIELD: {
             SQOpcode op;
-            Expr *arg = NULL;
             if(_token == TK_RETURN) {
                 op = _OP_RETURN;
             }
             else {
                 op = _OP_YIELD;
-                _fs->_bgenerator = true;
             }
             Lex();
+            
+            Expr *arg = NULL;
             if(!IsEndOfStatement()) {
-                SQInteger retexp = _fs->GetCurrentPos()+1;
                 arg = Expression(SQE_RVALUE);
-                if(op == _OP_RETURN && _fs->_traps > 0)
-                    _fs->AddInstruction(_OP_POPTRAP, _fs->_traps, 0);
-                _fs->_returnexp = retexp;
-                _fs->AddInstruction(op, 1, _fs->PopTarget(),_fs->GetStackSize());
             }
-            else{
-                if(op == _OP_RETURN && _fs->_traps > 0)
-                    _fs->AddInstruction(_OP_POPTRAP, _fs->_traps ,0);
-                _fs->_returnexp = -1;
-                _fs->AddInstruction(op, 0xFF,0,_fs->GetStackSize());
-            }
+          
 
-            result = op == _OP_RETURN ? static_cast<TerminateStatement *>(new ReturnStatement(arg)) : new YieldStatement(arg);
-            break;}
+            result = op == _OP_RETURN ? static_cast<TerminateStatement *>(newNode<ReturnStatement>(arg)) : newNode<YieldStatement>(arg);
+            break;
+        }
         case TK_BREAK:
-            if(_fs->_breaktargets.size() <= 0)Error(_SC("'break' has to be in a loop block"));
-            if(_fs->_breaktargets.top() > 0){
-                _fs->AddInstruction(_OP_POPTRAP, _fs->_breaktargets.top(), 0);
-            }
-            RESOLVE_OUTERS();
-            _fs->AddInstruction(_OP_JMP, 0, -1234);
-            _fs->_unresolvedbreaks.push_back(_fs->GetCurrentPos());
             Lex();
-            result = new BreakStatement(NULL);
+            result = newNode<BreakStatement>(nullptr);
             break;
         case TK_CONTINUE:
-            if(_fs->_continuetargets.size() <= 0)Error(_SC("'continue' has to be in a loop block"));
-            if(_fs->_continuetargets.top() > 0) {
-                _fs->AddInstruction(_OP_POPTRAP, _fs->_continuetargets.top(), 0);
-            }
-            RESOLVE_OUTERS();
-            _fs->AddInstruction(_OP_JMP, 0, -1234);
-            _fs->_unresolvedcontinues.push_back(_fs->GetCurrentPos());
             Lex();
-            result = new ContinueStatement(NULL);
+            result = newNode<ContinueStatement>(nullptr);
             break;
         case TK_FUNCTION:
-            if (!(_fs->lang_features & LF_NO_FUNC_DECL_SUGAR))
+            if (!(_lang_features & LF_NO_FUNC_DECL_SUGAR))
                 result = parseFunctionStatement();
             else
                 Error(_SC("Syntactic sugar for declaring functions as fields is disabled"));
             break;
         case TK_CLASS:
-            if (!(_fs->lang_features & LF_NO_CLASS_DECL_SUGAR))
+            if (!(_lang_features & LF_NO_CLASS_DECL_SUGAR))
                 result = parseClassStatement();
             else
                 Error(_SC("Syntactic sugar for declaring classes as fields is disabled"));
@@ -1093,26 +1012,17 @@ public:
         case TK_ENUM:
             result = parseEnumStatement(false);
             break;
-        case _SC('{'):{
-                BEGIN_SCOPE();
-                Lex();
-                result = Statements();
-                Expect(_SC('}'));
-                if(closeframe) {
-                    END_SCOPE();
-                }
-                else {
-                    END_SCOPE_NO_CLOSE();
-                }
-            }
+        case _SC('{'):
+            Lex();
+            result = parseStatements();
+            Expect(_SC('}'));
             break;
         case TK_TRY:
             result = parseTryCatchStatement();
             break;
         case TK_THROW:
             Lex();
-            result = new ThrowStatement(Expression(SQE_RVALUE));
-            _fs->AddInstruction(_OP_THROW, _fs->PopTarget());
+            result = newNode<ThrowStatement>(Expression(SQE_RVALUE));
             break;
         case TK_CONST:
             result = parseConstStatement(false);
@@ -1127,71 +1037,20 @@ public:
                 Error(_SC("global can be applied to const and enum only"));
             break;
         default:
-            result = new ExprStatement(Expression(SQE_REGULAR));
-            _fs->DiscardTarget();
-            //_fs->PopTarget();
+            result = newNode<ExprStatement>(Expression(SQE_REGULAR));
             break;
         }
         assert(result);
         result->setLinePos(line);
-        _fs->SnoozeOpt();
         return result;
     }
-    void EmitDerefOp(SQOpcode op)
-    {
-        SQInteger val = _fs->PopTarget();
-        SQInteger key = _fs->PopTarget();
-        SQInteger src = _fs->PopTarget();
-        _fs->AddInstruction(op,_fs->PushTarget(),src,key,val);
-    }
-    void Emit2ArgsOP(SQOpcode op, SQInteger p3 = 0)
-    {
-        SQInteger p2 = _fs->PopTarget(); //src in OP_GET
-        SQInteger p1 = _fs->PopTarget(); //key in OP_GET
-        _fs->AddInstruction(op,_fs->PushTarget(), p1, p2, p3);
-    }
-    void EmitCompoundArith(SQInteger tok, SQInteger etype, SQInteger pos)
-    {
-        /* Generate code depending on the expression type */
-        switch(etype) {
-        case LOCAL:{
-            SQInteger p2 = _fs->PopTarget(); //src in OP_GET
-            SQInteger p1 = _fs->PopTarget(); //key in OP_GET
-            _fs->PushTarget(p1);
-            //EmitCompArithLocal(tok, p1, p1, p2);
-            _fs->AddInstruction(ChooseArithOpByToken(tok),p1, p2, p1, 0);
-            _fs->SnoozeOpt();
-                   }
-            break;
-        case OBJECT:
-        case BASE:
-            {
-                SQInteger val = _fs->PopTarget();
-                SQInteger key = _fs->PopTarget();
-                SQInteger src = _fs->PopTarget();
-                /* _OP_COMPARITH mixes dest obj and source val in the arg1 */
-                _fs->AddInstruction(_OP_COMPARITH, _fs->PushTarget(), (src<<16)|val, key, ChooseCompArithCharByToken(tok));
-            }
-            break;
-        case OUTER:
-            {
-                SQInteger val = _fs->TopTarget();
-                SQInteger tmp = _fs->PushTarget();
-                _fs->AddInstruction(_OP_GETOUTER,   tmp, pos);
-                _fs->AddInstruction(ChooseArithOpByToken(tok), tmp, val, tmp, 0);
-                _fs->PopTarget();
-                _fs->PopTarget();
-                _fs->AddInstruction(_OP_SETOUTER, _fs->PushTarget(), pos, tmp);
-            }
-            break;
-        }
-    }
+
     Expr *parseCommaExpr(SQExpressionContext expression_context)
     {
         Expr *expr = Expression(expression_context);
 
         if (_token == ',') {
-            CommaExpr *cm = new CommaExpr(_ss(_vm)->_alloc_ctx);
+            CommaExpr *cm = newNode<CommaExpr>(arena());
             cm->addExpression(expr);
             expr = cm;
             while (_token == ',') {
@@ -1200,7 +1059,6 @@ public:
             }
         }
 
-        //for(;_token == ',';_fs->PopTarget(), Lex(), CommaExpr(expression_context));
         return expr;
     }
     Expr *Expression(SQExpressionContext expression_context)
@@ -1210,14 +1068,6 @@ public:
 
         SQInteger line = _lex._prevtoken == _SC('\n') ? _lex._lasttokenline : _lex._currentline;
 
-        if (_ss(_vm)->_lineInfoInExpressions && _fs)
-          _fs->AddLineInfos(line, _lineinfo, false);
-
-         SQExpState es = _es;
-        _es.etype     = EXPR;
-        _es.epos      = -1;
-        _es.donot_get = false;
-        _es.literal_field = false;
         Expr *expr = LogicalNullCoalesceExp();
 
         if (_token == TK_INEXPR_ASSIGNMENT && (expression_context == SQE_REGULAR || expression_context == SQE_FUNCTION_ARG))
@@ -1231,329 +1081,220 @@ public:
         case TK_PLUSEQ:
         case TK_MULEQ:
         case TK_DIVEQ:
-        case TK_MODEQ:{
+        case TK_MODEQ: {
             SQInteger op = _token;
-            SQInteger ds = _es.etype;
-            SQInteger pos = _es.epos;
-            bool literalField = _es.literal_field;
-            if(ds == EXPR) Error(_SC("can't assign to expression"));
-            else if(ds == BASE) Error(_SC("'base' cannot be modified"));
-            else if (_es.isBinding() && _token!=TK_INEXPR_ASSIGNMENT) Error(_SC("can't assign to binding (probably declaring using 'local' was intended, but 'let' was used)"));
-            Lex(); 
+            Lex();
             Expr *e2 = Expression(SQE_RVALUE);
 
-            switch(op){
-            case TK_NEWSLOT:
-                if(ds == OBJECT || ds == BASE)
-                    EmitDerefOp(_OP_NEWSLOT);
-                else //if _derefstate != DEREF_NO_DEREF && DEREF_FIELD so is the index of a local
-                    Error(_SC("can't 'create' a local slot"));
-                
-                expr = new BinExpr(TO_NEWSLOT, expr, e2);
-
-                break;
-
+            switch (op) {
+            case TK_NEWSLOT: expr = newNode<BinExpr>(TO_NEWSLOT, expr, e2); break;
             case TK_INEXPR_ASSIGNMENT:
             case _SC('='): //ASSIGN
                 if (op == _SC('='))
                     switch (expression_context)
                     {
-                        case SQE_IF:
-                            Error(_SC("'=' inside 'if' is forbidden"));
-                            break;
-                        case SQE_LOOP_CONDITION:
-                            Error(_SC("'=' inside loop condition is forbidden"));
-                            break;
-                        case SQE_SWITCH:
-                            Error(_SC("'=' inside switch is forbidden"));
-                            break;
-                        case SQE_FUNCTION_ARG:
-                            Error(_SC("'=' inside function argument is forbidden"));
-                            break;
-                        case SQE_RVALUE:
-                            Error(_SC("'=' inside expression is forbidden"));
-                            break;
-                        case SQE_REGULAR:
-                            break;
+                    case SQE_IF:
+                        Error(_SC("'=' inside 'if' is forbidden"));
+                        break;
+                    case SQE_LOOP_CONDITION:
+                        Error(_SC("'=' inside loop condition is forbidden"));
+                        break;
+                    case SQE_SWITCH:
+                        Error(_SC("'=' inside switch is forbidden"));
+                        break;
+                    case SQE_FUNCTION_ARG:
+                        Error(_SC("'=' inside function argument is forbidden"));
+                        break;
+                    case SQE_RVALUE:
+                        Error(_SC("'=' inside expression is forbidden"));
+                        break;
+                    case SQE_REGULAR:
+                        break;
                     }
-                expr = new BinExpr(op == TK_INEXPR_ASSIGNMENT ? TO_INEXPR_ASSIGN : TO_ASSIGN, expr, e2);
-                switch(ds) {
-                case LOCAL:
-                    {
-                        SQInteger src = _fs->PopTarget();
-                        SQInteger dst = _fs->TopTarget();
-                        _fs->AddInstruction(_OP_MOVE, dst, src);
-                    }
-                    break;
-                case OBJECT:
-                case BASE:
-                    EmitDerefOp(literalField ? _OP_SET_LITERAL : _OP_SET);
-                    SQ_STATIC_ASSERT(_OP_DATA_NOP == 0);
-                    if (literalField)
-                        _fs->AddInstruction(SQOpcode(0),0,0,0,0);//hint
-                    break;
-                case OUTER:
-                    {
-                        SQInteger src = _fs->PopTarget();
-                        SQInteger dst = _fs->PushTarget();
-                        _fs->AddInstruction(_OP_SETOUTER, dst, pos, src);
-                    }
-                }
+                expr = newNode<BinExpr>(op == TK_INEXPR_ASSIGNMENT ? TO_INEXPR_ASSIGN : TO_ASSIGN, expr, e2);
                 break;
-            case TK_MINUSEQ:
-                expr = new BinExpr(TO_MINUSEQ, expr, e2); goto emit;
-            case TK_PLUSEQ:
-                expr = new BinExpr(TO_PLUSEQ, expr, e2); goto emit;
-            case TK_MULEQ:
-                expr = new BinExpr(TO_MULEQ, expr, e2); goto emit;
-            case TK_DIVEQ:
-                expr = new BinExpr(TO_DIVEQ, expr, e2); goto emit;
-            case TK_MODEQ:
-                expr = new BinExpr(TO_MODEQ, expr, e2); goto emit;
-            emit:
-                EmitCompoundArith(op, ds, pos);
-                break;
+            case TK_MINUSEQ: expr = newNode<BinExpr>(TO_MINUSEQ, expr, e2); break;
+            case TK_PLUSEQ: expr = newNode<BinExpr>(TO_PLUSEQ, expr, e2); break;
+            case TK_MULEQ: expr = newNode<BinExpr>(TO_MULEQ, expr, e2); break;
+            case TK_DIVEQ: expr = newNode<BinExpr>(TO_DIVEQ, expr, e2); break;
+            case TK_MODEQ: expr = newNode<BinExpr>(TO_MODEQ, expr, e2); break;
             }
-            }
-            break;
-        case _SC('?'): {
-            Lex();
-            _fs->AddInstruction(_OP_JZ, _fs->PopTarget());
-            SQInteger jzpos = _fs->GetCurrentPos();
-            SQInteger trg = _fs->PushTarget();
-            Expr *ifTrue = Expression(SQE_RVALUE);
-            SQInteger first_exp = _fs->PopTarget();
-            if(trg != first_exp) _fs->AddInstruction(_OP_MOVE, trg, first_exp);
-            SQInteger endfirstexp = _fs->GetCurrentPos();
-            _fs->AddInstruction(_OP_JMP, 0, 0);
-            Expect(_SC(':'));
-            SQInteger jmppos = _fs->GetCurrentPos();
-            Expr *ifFalse = Expression(SQE_RVALUE);
-            SQInteger second_exp = _fs->PopTarget();
-            if(trg != second_exp) _fs->AddInstruction(_OP_MOVE, trg, second_exp);
-            _fs->SetInstructionParam(jmppos, 1, _fs->GetCurrentPos() - jmppos);
-            _fs->SetInstructionParam(jzpos, 1, endfirstexp - jzpos + 1);
-            _fs->SnoozeOpt();
-            expr = new TerExpr(expr, ifTrue, ifFalse);
-            }
-            break;
         }
-        _es = es;
+        break;
+        case _SC('?'): {
+            Consume('?');
+
+            Expr *ifTrue = Expression(SQE_RVALUE);
+
+            Expect(_SC(':'));
+
+            Expr *ifFalse = Expression(SQE_RVALUE);
+
+            expr = newNode<TerExpr>(expr, ifTrue, ifFalse);
+        }
+        break;
+        }
+
         _expression_context = saved_expression_context;
         expr->setLinePos(line);
         return expr;
     }
-    template<typename T> Expr *INVOKE_EXP(T f)
-    {
-        SQExpState es = _es;
-        _es.etype     = EXPR;
-        _es.epos      = -1;
-        _es.donot_get = false;
-        _es.literal_field = false;
-        Expr *r = (this->*f)();
-        _es = es;
-        return r;
-    }
-    template<typename T> Expr *BIN_EXP(SQOpcode op, T f, enum TreeOp top, Expr *lhs, SQInteger op3 = 0)
+
+    template<typename T> Expr *BIN_EXP(T f, enum TreeOp top, Expr *lhs)
     {
         _expression_context = SQE_RVALUE;
+
         Lex();
-        Expr *rhs = INVOKE_EXP(f);
-        SQInteger op1 = _fs->PopTarget();
-        SQInteger op2 = _fs->PopTarget();
-        _fs->AddInstruction(op, _fs->PushTarget(), op1, op2, op3);
-        _es.etype = EXPR;
-        return new BinExpr(top, lhs, rhs);
+        
+        Expr *rhs = (this->*f)();
+        
+        return newNode<BinExpr>(top, lhs, rhs);
     }
     Expr *LogicalNullCoalesceExp()
     {
         Expr *lhs = LogicalOrExp();
-        for(;;) if(_token == TK_NULLCOALESCE) {
-            SQInteger first_exp = _fs->PopTarget();
-            SQInteger trg = _fs->PushTarget();
-            _fs->AddInstruction(_OP_NULLCOALESCE, trg, 0, first_exp, 0);
-            SQInteger jpos = _fs->GetCurrentPos();
-            if(trg != first_exp) _fs->AddInstruction(_OP_MOVE, trg, first_exp);
-            Lex(); 
-            Expr *rhs = INVOKE_EXP(&SQCompiler::LogicalNullCoalesceExp);
-            _fs->SnoozeOpt();
-            SQInteger second_exp = _fs->PopTarget();
-            if(trg != second_exp) _fs->AddInstruction(_OP_MOVE, trg, second_exp);
-            _fs->SnoozeOpt();
-            _fs->SetInstructionParam(jpos, 1, (_fs->GetCurrentPos() - jpos));
-            _es.etype = EXPR;
-            lhs = new BinExpr(TO_NULLC, lhs, rhs);
-        } else return lhs;
+        for (;;) {
+            if (_token == TK_NULLCOALESCE) {
+                Lex();
+
+                Expr *rhs = LogicalNullCoalesceExp();
+                lhs = newNode<BinExpr>(TO_NULLC, lhs, rhs);
+            }
+            else return lhs;
+        }
     }
     Expr *LogicalOrExp()
     {
         Expr *lhs = LogicalAndExp();
-        for(;;) if(_token == TK_OR) {
-            SQInteger first_exp = _fs->PopTarget();
-            SQInteger trg = _fs->PushTarget();
-            _fs->AddInstruction(_OP_OR, trg, 0, first_exp, 0);
-            SQInteger jpos = _fs->GetCurrentPos();
-            if(trg != first_exp) _fs->AddInstruction(_OP_MOVE, trg, first_exp);
-            Lex(); 
-            Expr *rhs = INVOKE_EXP(&SQCompiler::LogicalOrExp);
-            _fs->SnoozeOpt();
-            SQInteger second_exp = _fs->PopTarget();
-            if(trg != second_exp) _fs->AddInstruction(_OP_MOVE, trg, second_exp);
-            _fs->SnoozeOpt();
-            _fs->SetInstructionParam(jpos, 1, (_fs->GetCurrentPos() - jpos));
-            _es.etype = EXPR;
-            lhs = new BinExpr(TO_OROR, lhs, rhs);
+        for (;;) {
+            if (_token == TK_OR) {
+                Lex();
+
+                Expr *rhs = LogicalOrExp();
+                lhs = newNode<BinExpr>(TO_OROR, lhs, rhs);
+            }
+            else return lhs;
         }
-        else return lhs;
     }
     Expr *LogicalAndExp()
     {
         Expr *lhs = BitwiseOrExp();
-        for(;;) switch(_token) {
-        case TK_AND: {
-            SQInteger first_exp = _fs->PopTarget();
-            SQInteger trg = _fs->PushTarget();
-            _fs->AddInstruction(_OP_AND, trg, 0, first_exp, 0);
-            SQInteger jpos = _fs->GetCurrentPos();
-            if(trg != first_exp) _fs->AddInstruction(_OP_MOVE, trg, first_exp);
-            Lex(); 
-            Expr *rhs = INVOKE_EXP(&SQCompiler::LogicalAndExp);
-            _fs->SnoozeOpt();
-            SQInteger second_exp = _fs->PopTarget();
-            if(trg != second_exp) _fs->AddInstruction(_OP_MOVE, trg, second_exp);
-            _fs->SnoozeOpt();
-            _fs->SetInstructionParam(jpos, 1, (_fs->GetCurrentPos() - jpos));
-            _es.etype = EXPR;
-            lhs = new BinExpr(TO_ANDAND, lhs, rhs);
-        }
-        default:
-            return lhs;
+        for (;;) {
+            switch (_token) {
+            case TK_AND: {
+                Lex();
+                
+                Expr *rhs = LogicalAndExp();
+                lhs = newNode<BinExpr>(TO_ANDAND, lhs, rhs);
+            }
+            default:
+                return lhs;
+            }
         }
     }
     Expr *BitwiseOrExp()
     {
         Expr *lhs = BitwiseXorExp();
-        for(;;) 
-            if(_token == _SC('|')) {
-                return BIN_EXP(_OP_BITW, &SQCompiler::BitwiseXorExp, TO_OR, lhs, BW_OR);
+        for (;;) {
+            if (_token == _SC('|')) {
+                return BIN_EXP(&SQParser::BitwiseOrExp, TO_OR, lhs);
             }
             else return lhs;
+        }
     }
     Expr *BitwiseXorExp()
     {
         Expr * lhs = BitwiseAndExp();
-        for(;;)
-            if(_token == _SC('^')) {
-                lhs = BIN_EXP(_OP_BITW, &SQCompiler::BitwiseAndExp,TO_XOR, lhs, BW_XOR);
-            } else return lhs;
+        for (;;) {
+            if (_token == _SC('^')) {
+                lhs = BIN_EXP(&SQParser::BitwiseAndExp, TO_XOR, lhs);
+            }
+            else return lhs;
+        }
     }
     Expr *BitwiseAndExp()
     {
         Expr *lhs = EqExp();
-        for(;;)
-            if(_token == _SC('&')) {
-                lhs = BIN_EXP(_OP_BITW, &SQCompiler::EqExp,TO_AND, lhs, BW_AND);
-            } else return lhs;
+        for (;;) {
+            if (_token == _SC('&')) {
+                lhs = BIN_EXP(&SQParser::EqExp, TO_AND, lhs);
+            }
+            else return lhs;
+        }
     }
     Expr *EqExp()
     {
         Expr *lhs = CompExp();
-        for(;;) switch(_token) {
-        case TK_EQ: lhs = BIN_EXP(_OP_EQ, &SQCompiler::CompExp, TO_EQ, lhs); break;
-        case TK_NE: lhs = BIN_EXP(_OP_NE, &SQCompiler::CompExp, TO_NE, lhs); break;
-        case TK_3WAYSCMP: lhs = BIN_EXP(_OP_CMP, &SQCompiler::CompExp, TO_3CMP, lhs, CMP_3W); break;
-        default: return lhs;
+        for (;;) {
+            switch (_token) {
+            case TK_EQ: lhs = BIN_EXP(&SQParser::CompExp, TO_EQ, lhs); break;
+            case TK_NE: lhs = BIN_EXP(&SQParser::CompExp, TO_NE, lhs); break;
+            case TK_3WAYSCMP: lhs = BIN_EXP(&SQParser::CompExp, TO_3CMP, lhs); break;
+            default: return lhs;
+            }
         }
     }
     Expr *CompExp()
     {
         Expr *lhs = ShiftExp();
-        for(;;) switch(_token) {
-        case _SC('>'): lhs = BIN_EXP(_OP_CMP, &SQCompiler::ShiftExp,TO_GT, lhs, CMP_G); break;
-        case _SC('<'): lhs = BIN_EXP(_OP_CMP, &SQCompiler::ShiftExp, TO_LT, lhs, CMP_L); break;
-        case TK_GE: lhs = BIN_EXP(_OP_CMP, &SQCompiler::ShiftExp, TO_GE, lhs, CMP_GE); break;
-        case TK_LE: lhs = BIN_EXP(_OP_CMP, &SQCompiler::ShiftExp, TO_LE, lhs, CMP_LE); break;
-        case TK_IN: lhs = BIN_EXP(_OP_EXISTS, &SQCompiler::ShiftExp, TO_IN, lhs); break;
-        case TK_INSTANCEOF: lhs = BIN_EXP(_OP_INSTANCEOF, &SQCompiler::ShiftExp, TO_INSTANCEOF, lhs); break;
-        case TK_NOT: {
-            Lex();
-            if (_token == TK_IN) {
-                lhs = BIN_EXP(_OP_EXISTS, &SQCompiler::ShiftExp, TO_IN, lhs);
-                SQInteger src = _fs->PopTarget();
-                _fs->AddInstruction(_OP_NOT, _fs->PushTarget(), src);
-                lhs = new UnExpr(TO_NOT, lhs);
+        for (;;) {
+            switch (_token) {
+            case _SC('>'): lhs = BIN_EXP(&SQParser::ShiftExp, TO_GT, lhs); break;
+            case _SC('<'): lhs = BIN_EXP(&SQParser::ShiftExp, TO_LT, lhs); break;
+            case TK_GE: lhs = BIN_EXP(&SQParser::ShiftExp, TO_GE, lhs); break;
+            case TK_LE: lhs = BIN_EXP(&SQParser::ShiftExp, TO_LE, lhs); break;
+            case TK_IN: lhs = BIN_EXP(&SQParser::ShiftExp, TO_IN, lhs); break;
+            case TK_INSTANCEOF: lhs = BIN_EXP(&SQParser::ShiftExp, TO_INSTANCEOF, lhs); break;
+            case TK_NOT: {
+                Lex();
+                if (_token == TK_IN) {
+                    lhs = BIN_EXP(&SQParser::ShiftExp, TO_IN, lhs);
+                    lhs = newNode<UnExpr>(TO_NOT, lhs);
+                }
+                else
+                    Error(_SC("'in' expected "));
             }
-            else
-                Error(_SC("'in' expected "));
-        }
-        default: return lhs;
+            default: return lhs;
+            }
         }
     }
     Expr *ShiftExp()
     {
         Expr *lhs = PlusExp();
-        for(;;) switch(_token) {
-        case TK_USHIFTR: lhs = BIN_EXP(_OP_BITW, &SQCompiler::PlusExp, TO_USHR, lhs,BW_USHIFTR); break;
-        case TK_SHIFTL: lhs = BIN_EXP(_OP_BITW, &SQCompiler::PlusExp, TO_SHL, lhs,BW_SHIFTL); break;
-        case TK_SHIFTR: lhs = BIN_EXP(_OP_BITW, &SQCompiler::PlusExp, TO_SHR, lhs,BW_SHIFTR); break;
-        default: return lhs;
+        for (;;) {
+            switch (_token) {
+            case TK_USHIFTR: lhs = BIN_EXP(&SQParser::PlusExp, TO_USHR, lhs); break;
+            case TK_SHIFTL: lhs = BIN_EXP(&SQParser::PlusExp, TO_SHL, lhs); break;
+            case TK_SHIFTR: lhs = BIN_EXP(&SQParser::PlusExp, TO_SHR, lhs); break;
+            default: return lhs;
+            }
         }
     }
-    SQOpcode ChooseArithOpByToken(SQInteger tok)
-    {
-        switch(tok) {
-            case TK_PLUSEQ: case '+': return _OP_ADD;
-            case TK_MINUSEQ: case '-': return _OP_SUB;
-            case TK_MULEQ: case '*': return _OP_MUL;
-            case TK_DIVEQ: case '/': return _OP_DIV;
-            case TK_MODEQ: case '%': return _OP_MOD;
-            default: assert(0);
-        }
-        return _OP_ADD;
-    }
-    enum TreeOp ChooseArithTreeOpByToken(SQInteger tok)
-    {
-        switch (tok) {
-        case TK_PLUSEQ: case '+': return TO_ADD;
-        case TK_MINUSEQ: case '-': return TO_SUB;
-        case TK_MULEQ: case '*': return TO_MUL;
-        case TK_DIVEQ: case '/': return TO_DIV;
-        case TK_MODEQ: case '%': return TO_MOD;
-        default: assert(0);
-        }
-        return TO_ADD;
-    }
-    SQInteger ChooseCompArithCharByToken(SQInteger tok)
-    {
-        SQInteger oper;
-        switch(tok){
-        case TK_MINUSEQ: oper = '-'; break;
-        case TK_PLUSEQ: oper = '+'; break;
-        case TK_MULEQ: oper = '*'; break;
-        case TK_DIVEQ: oper = '/'; break;
-        case TK_MODEQ: oper = '%'; break;
-        default: oper = 0; //shut up compiler
-            assert(0); break;
-        };
-        return oper;
-    }
+
     Expr *PlusExp()
     {
         Expr *lhs = MultExp();
-        for(;;) switch(_token) {
-        case _SC('+'): case _SC('-'):
-            lhs = BIN_EXP(ChooseArithOpByToken(_token), &SQCompiler::MultExp, ChooseArithTreeOpByToken(_token), lhs); break;
-        default: return lhs;
+        for (;;) {
+            switch (_token) {
+            case _SC('+'): lhs = BIN_EXP(&SQParser::MultExp, TO_ADD, lhs); break;
+            case _SC('-'): lhs = BIN_EXP(&SQParser::MultExp, TO_SUB, lhs); break;
+                
+            default: return lhs;
+            }
         }
     }
 
     Expr *MultExp()
     {
         Expr *lhs = PrefixedExpr();
-        for(;;) switch(_token) {
-        case _SC('*'): case _SC('/'): case _SC('%'):
-            lhs = BIN_EXP(ChooseArithOpByToken(_token), &SQCompiler::PrefixedExpr, ChooseArithTreeOpByToken(_token), lhs); break;
-        default: return lhs;
+        for (;;) {
+            switch (_token) {
+            case _SC('*'): lhs = BIN_EXP(&SQParser::PrefixedExpr, TO_MUL, lhs); break;
+            case _SC('/'): lhs = BIN_EXP(&SQParser::PrefixedExpr, TO_DIV, lhs); break;
+            case _SC('%'): lhs = BIN_EXP(&SQParser::PrefixedExpr, TO_MOD, lhs); break;
+                
+            default: return lhs;
+            }
         }
     }
     //if 'pos' != -1 the previous variable is a local variable
@@ -1566,75 +1307,27 @@ public:
             switch(_token) {
             case _SC('.'):
             case TK_NULLGETSTR: {
-                SQInteger flags = 0;
                 if (_token == TK_NULLGETSTR || nextIsNullable)
                 {
-                    flags = OP_GET_FLAG_NO_ERROR;
                     nextIsNullable = true;
                 }
-                pos = -1;
-                bool canBeLiteral = _es.etype!=BASE && _token == _SC('.');//todo: we can support def delegate and nullable also.
                 Lex();
 
-                Id *id = NULL;
-                SQObjectPtr constant = Expect(TK_IDENTIFIER, (Expr **)&id);
-                if (CanBeDefaultDelegate(constant))
-                    flags |= OP_GET_FLAG_ALLOW_DEF_DELEGATE;
-                _es.literal_field = canBeLiteral && !(flags & (OP_GET_FLAG_NO_ERROR|OP_GET_FLAG_ALLOW_DEF_DELEGATE));//todo: we can support def delegate and nullable also.
-
-                e = new GetFieldExpr(e, id->id(), nextIsNullable);
-
-                SQInteger constantI = _fs->GetConstant(constant);
-                _fs->AddInstruction(_OP_LOAD, _fs->PushTarget(), constantI);
-                if(_es.etype==BASE) {
-                    Emit2ArgsOP(_OP_GET, flags);
-                    pos = _fs->TopTarget();
-                    _es.etype = EXPR;
-                    _es.epos   = pos;
-                }
-                else {
-                    //todo:we can support null navigation as well
-                    if(NeedGet()) {
-                        if (!_es.literal_field)
-                        {
-                            Emit2ArgsOP(_OP_GET, flags);
-                        } else {
-                            Emit2ArgsOP(_OP_GET_LITERAL, flags);
-                            SQ_STATIC_ASSERT(_OP_DATA_NOP == 0);
-                            _fs->AddInstruction(SQOpcode(0),0,0,0,0);//hint
-                        }
-                    }
-                    _es.etype = OBJECT;
-                }
+                Id *id = (Id *)Expect(TK_IDENTIFIER);
+                e = newNode<GetFieldExpr>(e, id->id(), nextIsNullable);
                 break;
             }
             case _SC('['):
             case TK_NULLGETOBJ: {
-                SQInteger flags = 0;
                 if (_token == TK_NULLGETOBJ || nextIsNullable)
                 {
-                    flags = OP_GET_FLAG_NO_ERROR;
                     nextIsNullable = true;
                 }
                 if(_lex._prevtoken == _SC('\n')) Error(_SC("cannot break deref/or comma needed after [exp]=exp slot declaration"));
-                _es.literal_field = false;
                 Lex(); 
                 Expr *key = Expression(SQE_RVALUE); 
                 Expect(_SC(']'));
-                e = new GetTableExpr(e, key, nextIsNullable);
-                pos = -1;
-                if(_es.etype==BASE) {
-                    Emit2ArgsOP(_OP_GET, flags);
-                    pos = _fs->TopTarget();
-                    _es.etype = EXPR;
-                    _es.epos   = pos;
-                }
-                else {
-                    if(NeedGet()) {
-                        Emit2ArgsOP(_OP_GET, flags);
-                    }
-                    _es.etype = OBJECT;
-                }
+                e = newNode<GetTableExpr>(e, key, nextIsNullable);
                 break;
             }
             case TK_MINUSMINUS:
@@ -1643,74 +1336,23 @@ public:
                     nextIsNullable = false;
                     if(IsEndOfStatement()) return e;
                     SQInteger diff = (_token==TK_MINUSMINUS) ? -1 : 1;
-                    enum TreeOp top = (_token == TK_MINUSMINUS) ? TO_PDEC : TO_PINC;
                     Lex();
-                    if (_es.isBinding())
-                        Error(_SC("can't '++' or '--' a binding"));
-                    switch(_es.etype)
-                    {
-                        case EXPR: Error(_SC("can't '++' or '--' an expression")); break;
-                        case BASE: Error(_SC("'base' cannot be modified")); break;
-                        case OBJECT:
-                            if(_es.donot_get == true)  { Error(_SC("can't '++' or '--' an expression")); break; } //mmh dor this make sense?
-                            Emit2ArgsOP(_OP_PINC, diff);
-                            break;
-                        case LOCAL: {
-                            SQInteger src = _fs->PopTarget();
-                            _fs->AddInstruction(_OP_PINCL, _fs->PushTarget(), src, 0, diff);
-                                    }
-                            break;
-                        case OUTER: {
-                            SQInteger tmp1 = _fs->PushTarget();
-                            SQInteger tmp2 = _fs->PushTarget();
-                            _fs->AddInstruction(_OP_GETOUTER, tmp2, _es.epos);
-                            _fs->AddInstruction(_OP_PINCL,    tmp1, tmp2, 0, diff);
-                            _fs->AddInstruction(_OP_SETOUTER, tmp2, _es.epos, tmp2);
-                            _fs->PopTarget();
-                        }
-                    }
-                    _es.etype = EXPR;
-                    e = new IncExpr(e, diff, IF_POSTFIX);
+                    e = newNode<IncExpr>(e, diff, IF_POSTFIX);
                 }
                 return e;
             case _SC('('):
             case TK_NULLCALL: {
                 SQInteger nullcall = (_token==TK_NULLCALL || nextIsNullable);
                 nextIsNullable = !!nullcall;
-                CallExpr *call = new CallExpr(_ss(_vm)->_alloc_ctx, e, nullcall);
-                switch(_es.etype) {
-                    case OBJECT: {
-                        if (!nullcall) {
-                            SQInteger key     = _fs->PopTarget();  /* location of the key */
-                            SQInteger table   = _fs->PopTarget();  /* location of the object */
-                            SQInteger closure = _fs->PushTarget(); /* location for the closure */
-                            SQInteger ttarget = _fs->PushTarget(); /* location for 'this' pointer */
-                            _fs->AddInstruction(_OP_PREPCALL, closure, key, table, ttarget);
-                        } else {
-                            SQInteger self = _fs->GetUpTarget(1);  /* location of the object */
-                            SQInteger storedSelf = _fs->PushTarget();
-                            _fs->AddInstruction(_OP_MOVE, storedSelf, self);
-                            _fs->PopTarget();
-                            Emit2ArgsOP(_OP_GET, OP_GET_FLAG_NO_ERROR|OP_GET_FLAG_ALLOW_DEF_DELEGATE);
-                            SQInteger ttarget = _fs->PushTarget();
-                            _fs->AddInstruction(_OP_MOVE, ttarget, storedSelf);
-                        }
-                        break;
-                    }
-                    case BASE:
-                        //Emit2ArgsOP(_OP_GET);
-                        _fs->AddInstruction(_OP_MOVE, _fs->PushTarget(), 0);
-                        break;
-                    case OUTER:
-                        _fs->AddInstruction(_OP_GETOUTER, _fs->PushTarget(), _es.epos);
-                        _fs->AddInstruction(_OP_MOVE,     _fs->PushTarget(), 0);
-                        break;
-                    default:
-                        _fs->AddInstruction(_OP_MOVE, _fs->PushTarget(), 0);
-                }
-                _es.etype = EXPR;
+                CallExpr *call = newNode<CallExpr>(arena(), e, nullcall);
                 Lex();
-                FunctionCallArgs(call, false, nullcall);
+                while (_token != _SC(')')) {
+                    call->addArgument(Expression(SQE_FUNCTION_ARG));
+                    if (_token == _SC(',')) {
+                        Lex();
+                    }
+                }
+                Lex();
                 e = call;
                 break;
             }
@@ -1720,204 +1362,82 @@ public:
     }
     Expr *Factor(SQInteger &pos)
     {
-        if ((_token == TK_LOCAL || _token == TK_LET)
-            && (_expression_context == SQE_IF || _expression_context == SQE_SWITCH || _expression_context == SQE_LOOP_CONDITION))
-        {
-            // TODO
-            Lex();
-            if (_token != TK_IDENTIFIER)
-                Error(_SC("Identifier expected"));
+        //if ((_token == TK_LOCAL || _token == TK_LET)
+        //    && (_expression_context == SQE_IF || _expression_context == SQE_SWITCH || _expression_context == SQE_LOOP_CONDITION))
+        //{
+        //    // TODO
+        //    Lex();
 
-            SQObject id = _fs->CreateString(_lex._svalue);
-            CheckDuplicateLocalIdentifier(id, _SC("In-expr local"), false);
-            _fs->PushLocalVariable(id, _token == TK_LOCAL);
-            SQInteger res;
-            Expr *x = Factor(res);
-            if (_token != TK_INEXPR_ASSIGNMENT)
-                Error(_SC(":= expected"));
-            return x;
-        }
+        //    if (_token != TK_IDENTIFIER)
+        //        Error(_SC("Identifier expected"));
+
+        //    SQInteger res;
+        //    Expr *x = Factor(res);
+        //    assert(x->op() == TO_ID);
+
+        //    CheckDuplicateLocalIdentifier(x->asId()->id(), _SC("In-expr local"), false);
+        //    
+        //    if (_token != TK_INEXPR_ASSIGNMENT)
+        //        Error(_SC(":= expected"));
+        //    return x;
+        //}
 
         Expr *r = NULL;
-        //_es.etype = EXPR;
+        
         switch(_token)
         {
         case TK_STRING_LITERAL:
-            r = new LiteralExpr(_lex._svalue);
-            _fs->AddInstruction(_OP_LOAD, _fs->PushTarget(), _fs->GetConstant(_fs->CreateString(_lex._svalue,_lex._longstr.size()-1)));
+            r = newStringLiteral(_lex._svalue);
             Lex();
             break;
         case TK_BASE:
             Lex();
-            _fs->AddInstruction(_OP_GETBASE, _fs->PushTarget());
-            _es.etype  = BASE;
-            _es.epos   = _fs->TopTarget();
-            pos = (_es.epos);
-            return new BaseExpr(); /// TODO
-        case TK_IDENTIFIER:
-        case TK_CONSTRUCTOR:
-        case TK_THIS:{
-                bool assignable = false;
-                if (_token == TK_IDENTIFIER && sq_isstring(_fs->_name)
-                    && scstrcmp(_stringval(_fs->_name), _lex._svalue)==0
-                    && _fs->GetLocalVariable(_fs->_name, assignable) == -1)
-                {
-                    _fs->AddInstruction(_OP_LOADCALLEE, _fs->PushTarget());
-                    r = new CalleeExpr();
-                    Lex();
-                    break;
-                }
-
-                SQObject id;
-                SQObject constant;
-
-                switch(_token) {
-                    case TK_IDENTIFIER:  id = _fs->CreateString(_lex._svalue); r = new Id(_lex._svalue); break;
-                    case TK_THIS:        id = _fs->CreateString(_SC("this"),4); r = new Id(_SC("this")); break;
-                    case TK_CONSTRUCTOR: id = _fs->CreateString(_SC("constructor"), 11); r = new Id(_SC("constructor")); break;
-                }
-
-                if (_stringval(id) == _stringval(_fs->_name)) {
-                    Error(_SC("Variable name %s conflicts with function name"), _stringval(id));
-                }
-
-                SQInteger pos = -1;
-                Lex();
-                if((pos = _fs->GetLocalVariable(id, assignable)) != -1) {
-                    /* Handle a local variable (includes 'this') */
-                    _fs->PushTarget(pos);
-                    _es.etype  = LOCAL;
-                    _es.epos   = pos;
-                    _es.is_assignable_var = assignable;
-                }
-
-                else if((pos = _fs->GetOuterVariable(id, assignable)) != -1) {
-                    /* Handle a free var */
-                    if(NeedGet()) {
-                        _es.epos  = _fs->PushTarget();
-                        _fs->AddInstruction(_OP_GETOUTER, _es.epos, pos);
-                        /* _es.etype = EXPR; already default value */
-                    }
-                    else {
-                        _es.etype = OUTER;
-                        _es.epos  = pos;
-                        _es.is_assignable_var = assignable;
-                    }
-                }
-
-                else if(IsConstant(id, constant)) {
-                    /* Handle named constant */
-                    SQObjectPtr constval = constant;
-                    while (sq_type(constval) == OT_TABLE && (sq_objflags(constval) & SQOBJ_FLAG_IMMUTABLE) && _token==_SC('.')) {
-                        Expect('.');
-                        SQObject constid = Expect(TK_IDENTIFIER);
-                        if(!_table(constval)->Get(constid, constval)) {
-                            constval.Null();
-                            Error(_SC("invalid enum [no '%s' field in '%s']"), _stringval(constid), _stringval(id));
-                        }
-                    }
-                    _es.epos = _fs->PushTarget();
-
-                    /* generate direct or literal function depending on size */
-                    SQObjectType ctype = sq_type(constval);
-                    switch(ctype) {
-                    case OT_INTEGER:
-                        //r = new LiteralExpr(_integer(constval));
-                        EmitLoadConstInt(_integer(constval), _es.epos);
-                        break;
-                    case OT_FLOAT:
-                        //r = new LiteralExpr(_float(constval));
-                        EmitLoadConstFloat(_float(constval),_es.epos);
-                        break;
-                    case OT_BOOL:
-                        //r = new LiteralExpr(static_cast<bool>(_integer(constval)));
-                        _fs->AddInstruction(_OP_LOADBOOL, _es.epos, _integer(constval));
-                        break;
-                    default:
-                        //r = new LiteralExpr(_stringval(constval));
-                        _fs->AddInstruction(_OP_LOAD,_es.epos,_fs->GetConstant(constval)); break;
-                    }
-                    _es.etype = EXPR;
-                }
-                else {
-                    /* Handle a non-local variable, aka a field. Push the 'this' pointer on
-                    * the virtual stack (always found in offset 0, so no instruction needs to
-                    * be generated), and push the key next. Generate an _OP_LOAD instruction
-                    * for the latter. If we are not using the variable as a dref expr, generate
-                    * the _OP_GET instruction.
-                    */
-                    if ((_fs->lang_features & LF_EXPLICIT_THIS)
-                        && !(_fs->lang_features & LF_TOOLS_COMPILE_CHECK))
-                        Error(_SC("Unknown variable [%s]"), _stringval(id));
-
-                    _fs->PushTarget(0);
-                    _fs->AddInstruction(_OP_LOAD, _fs->PushTarget(), _fs->GetConstant(id));
-                    if(NeedGet()) {
-                        Emit2ArgsOP(_OP_GET);
-                    }
-                    _es.etype = OBJECT;
-                }
-                pos = _es.epos;
-                return r;
-            }
+            r = newNode<BaseExpr>();
             break;
+        case TK_IDENTIFIER: r = newId(_lex._svalue); Lex(); break;
+        case TK_CONSTRUCTOR: r = newNode<Id>(_SC("this")); Lex(); break;
+        case TK_THIS: r = newNode<Id>(_SC("constructor")); Lex(); break;
         case TK_DOUBLE_COLON:  // "::"
-            if (_fs->lang_features & LF_FORBID_ROOT_TABLE)
+            if (_lang_features & LF_FORBID_ROOT_TABLE)
                 Error(_SC("Access to root table is forbidden"));
-            _fs->AddInstruction(_OP_LOADROOT, _fs->PushTarget());
-            _es.etype = OBJECT;
             _token = _SC('.'); /* hack: drop into PrefixExpr, case '.'*/
-            _es.epos = -1;
-            pos = _es.epos;
-            return new RootExpr();
+            r = newNode<RootExpr>();
+            break;
         case TK_NULL:
-            _fs->AddInstruction(_OP_LOADNULLS, _fs->PushTarget(),1);
+            r = newNode<LiteralExpr>();
             Lex();
-            r = new LiteralExpr();
             break;
         case TK_INTEGER: 
-            r = new LiteralExpr(_lex._nvalue);
-            EmitLoadConstInt(_lex._nvalue,-1); Lex();  break;
+            r = newNode<LiteralExpr>(_lex._nvalue);
+            Lex(); 
+            break;
         case TK_FLOAT: 
-            r = new LiteralExpr(_lex._fvalue);
-            EmitLoadConstFloat(_lex._fvalue,-1); Lex(); break;
+            r = newNode<LiteralExpr>(_lex._fvalue);
+            Lex();
+            break;
         case TK_TRUE: case TK_FALSE:
-            r = new LiteralExpr((bool)(_token == TK_TRUE));
-            _fs->AddInstruction(_OP_LOADBOOL, _fs->PushTarget(),_token == TK_TRUE?1:0);
+            r = newNode<LiteralExpr>((bool)(_token == TK_TRUE));
             Lex();
             break;
         case _SC('['): {
-                _fs->AddInstruction(_OP_NEWOBJ, _fs->PushTarget(),0,0,NOT_ARRAY);
-                SQInteger apos = _fs->GetCurrentPos(),key = 0;
                 Lex();
-                ArrayExpr *arr = new ArrayExpr(_ss(_vm)->_alloc_ctx);
+                ArrayExpr *arr = newNode<ArrayExpr>(arena());
                 while(_token != _SC(']')) {
                     SQInteger line = _lex._currentline;
-                    #if SQ_LINE_INFO_IN_STRUCTURES
-                    if (key < 100)
-                      _fs->AddLineInfos(line, false);
-                    #endif
                     Expr *v = Expression(SQE_RVALUE);
                     v->setLinePos(line);
                     arr->addValue(v);
                     if(_token == _SC(',')) Lex();
-                    SQInteger val = _fs->PopTarget();
-                    SQInteger array = _fs->TopTarget();
-                    _fs->AddInstruction(_OP_APPENDARRAY, array, val, AAT_STACK);
-                    key++;
                 }
-                _fs->SetInstructionParam(apos, 1, key);
                 Lex();
                 r = arr;
             }
             break;
         case _SC('{'): {
-            _fs->AddInstruction(_OP_NEWOBJ, _fs->PushTarget(), 0, 0, NOT_TABLE);
             Lex();
-            // TODO
-            TableDecl *t = new TableDecl(_ss(_vm)->_alloc_ctx);
+            TableDecl *t = newNode<TableDecl>(arena());
             ParseTableOrClass(t, _SC(','), _SC('}'));
-            r = new DeclExpr(t);
+            r = newNode<DeclExpr>(t);
             break;
         }
         case TK_FUNCTION: 
@@ -1930,30 +1450,42 @@ public:
             Lex();
             Decl *classDecl = ClassExp(NULL);
             classDecl->setContext(DC_EXPR);
-            r = new DeclExpr(classDecl);
+            r = newNode<DeclExpr>(classDecl);
             break;
         }
         case _SC('-'):
             Lex();
             switch(_token) {
-            case TK_INTEGER: r = new LiteralExpr(-_lex._nvalue); EmitLoadConstInt(-_lex._nvalue, -1); Lex(); break;
-            case TK_FLOAT: r = new LiteralExpr(-_lex._fvalue); EmitLoadConstFloat(-_lex._fvalue,-1); Lex(); break;
-            default: r = UnaryOP(_OP_NEG);
+            case TK_INTEGER: 
+                r = newNode<LiteralExpr>(-_lex._nvalue);
+                Lex();
+                break;
+            case TK_FLOAT:
+                r = newNode<LiteralExpr>(-_lex._fvalue);
+                Lex();
+                break;
+            default:
+                r = UnaryOP(TO_NEG);
+                break;
             }
             break;
-        case _SC('!'): Lex(); r = UnaryOP(_OP_NOT); break;
+        case _SC('!'):
+            Lex();
+            r = UnaryOP(TO_NOT);
+            break;
         case _SC('~'):
             Lex();
             if(_token == TK_INTEGER)  { 
-                r = new LiteralExpr(~_lex._nvalue);
-                EmitLoadConstInt(~_lex._nvalue,-1); Lex(); break;
+                r = newNode<LiteralExpr>(~_lex._nvalue);
+                Lex(); 
             }
-            r = UnaryOP(_OP_BWNOT);
+            else {
+                r = UnaryOP(TO_BNOT);
+            }
             break;
-        case TK_TYPEOF : Lex(); r = UnaryOP(_OP_TYPEOF); break;
-        case TK_RESUME : Lex(); r = UnaryOP(_OP_RESUME); break;
-        case TK_CLONE : Lex(); r = UnaryOP(_OP_CLONE); break;
-        //case TK_RAWCALL: Lex(); Expect('('); FunctionCallArgs(true, false); break; // drop it
+        case TK_TYPEOF : Lex(); r = UnaryOP(TO_TYPEOF); break;
+        case TK_RESUME : Lex(); r = UnaryOP(TO_RESUME); break;
+        case TK_CLONE : Lex(); r = UnaryOP(TO_CLONE); break;
         case TK_MINUSMINUS :
         case TK_PLUSPLUS :
             r = PrefixIncDec(_token);
@@ -1961,134 +1493,34 @@ public:
         case TK_DELETE : r = DeleteExpr(); break;
         case _SC('('): 
             Lex(); 
-            r = new UnExpr(TO_PAREN, Expression(_expression_context));
+            r = newNode<UnExpr>(TO_PAREN, Expression(_expression_context));
             Expect(_SC(')'));
             break;
-        case TK___LINE__: r = new LiteralExpr(_lex._currentline);  EmitLoadConstInt(_lex._currentline, -1); Lex(); break;
-        case TK___FILE__: r = new LiteralExpr(_rawsourcename); _fs->AddInstruction(_OP_LOAD, _fs->PushTarget(), _fs->GetConstant(_sourcename)); Lex(); break;
+        case TK___LINE__:
+            r = newNode<LiteralExpr>(_lex._currentline);
+            Lex();
+            break;
+        case TK___FILE__:
+            r = newNode<LiteralExpr>(_sourcename);
+            Lex(); 
+            break;
         default: Error(_SC("expression expected"));
         }
-        _es.etype = EXPR;
-        pos = -1;
         return r;
     }
-    void EmitLoadConstInt(SQInteger value,SQInteger target)
-    {
-        if(target < 0) {
-            target = _fs->PushTarget();
-        }
-        if(value <= INT_MAX && value > INT_MIN) { //does it fit in 32 bits?
-            _fs->AddInstruction(_OP_LOADINT, target,value);
-        }
-        else {
-            _fs->AddInstruction(_OP_LOAD, target, _fs->GetNumericConstant(value));
-        }
-    }
-    void EmitLoadConstFloat(SQFloat value,SQInteger target)
-    {
-        if(target < 0) {
-            target = _fs->PushTarget();
-        }
-        if(sizeof(SQFloat) == sizeof(SQInt32)) {
-            _fs->AddInstruction(_OP_LOADFLOAT, target,*((SQInt32 *)&value));
-        }
-        else {
-            _fs->AddInstruction(_OP_LOAD, target, _fs->GetNumericConstant(value));
-        }
-    }
 
-    enum TreeOp unaryOp2TreeOp(SQOpcode op) {
-        switch (op)
-        {
-        case _OP_NEG: return TO_NEG;
-        case _OP_NOT: return TO_NOT;
-        case _OP_BWNOT: return TO_BNOT;
-        case _OP_TYPEOF: return TO_TYPEOF;
-        case _OP_RESUME: return TO_RESUME;
-        case _OP_CLONE: return TO_CLONE;
-        default:
-            assert(0);
-            return (TreeOp)0;
-        }
-    }
-
-    Expr *UnaryOP(SQOpcode op)
+    Expr *UnaryOP(enum TreeOp op)
     {
         Expr *arg = PrefixedExpr();
-        if (_fs->_targetstack.size() == 0)
-            Error(_SC("cannot evaluate unary-op"));
-        SQInteger src = _fs->PopTarget();
-        _fs->AddInstruction(op, _fs->PushTarget(), src);
-        return new UnExpr(unaryOp2TreeOp(op), arg);
+        return newNode<UnExpr>(op, arg);
+    }
 
-    }
-    bool NeedGet()
-    {
-        switch(_token) {
-        case _SC('('): case TK_NULLCALL:
-            return false;
-        case _SC('='): case TK_NEWSLOT: case TK_MODEQ: case TK_MULEQ:
-        case TK_DIVEQ: case TK_MINUSEQ: case TK_PLUSEQ:
-            if (_expression_context != SQE_REGULAR)
-                Error("can't assign to an expression or inside return/yield");
-            return false;
-        case TK_PLUSPLUS: case TK_MINUSMINUS:
-            if (!IsEndOfStatement()) {
-                return false;
-            }
-        break;
-        }
-        return (!_es.donot_get || ( _es.donot_get && (_token == _SC('.') || _token == _SC('['))));
-    }
-    void FunctionCallArgs(CallExpr *call, bool rawcall, bool nullcall)
-    {
-        SQInteger nargs = 1;//this
-         while(_token != _SC(')')) {
-             call->addArgument(Expression(SQE_FUNCTION_ARG));
-             MoveIfCurrentTargetIsLocal();
-             nargs++;
-             if(_token == _SC(',')){
-                 Lex();
-             }
-         }
-         Lex();
-         if (rawcall) {
-             if (nargs < 3) Error(_SC("rawcall requires at least 2 parameters (callee and this)"));
-             nargs -= 2; //removes callee and this from count
-         }
-         for(SQInteger i = 0; i < (nargs - 1); i++) _fs->PopTarget();
-         SQInteger stackbase = _fs->PopTarget();
-         SQInteger closure = _fs->PopTarget();
-         SQInteger target = _fs->PushTarget();
-         assert(target >= -1);
-         assert(target < 255);
-         _fs->AddInstruction(nullcall ? _OP_NULLCALL : _OP_CALL, target, closure, stackbase, nargs);
-    }
-    bool CheckMemberUniqueness(sqvector<SQObject> &vec, SQObject &obj) {
-        for (SQUnsignedInteger i=0, n=vec.size(); i<n; ++i) {
-            if (vec[i]._type == obj._type && vec[i]._unVal.raw == obj._unVal.raw) {
-                if (sq_isstring(obj))
-                    Error(_SC("duplicate key '%s'"), sq_objtostring(&obj));
-                else
-                    Error(_SC("duplicate key"));
-                return false;
-            }
-        }
-        vec.push_back(obj);
-        return true;
-    }
     void ParseTableOrClass(TableDecl *decl, SQInteger separator,SQInteger terminator)
     {
-        SQInteger tpos = _fs->GetCurrentPos(),nkeys = 0;
-        sqvector<SQObject> *memberConstantKeys = new sqvector<SQObject>(_fs->_sharedstate->_alloc_ctx);
-        _member_constant_keys_check.push_back(memberConstantKeys);
         NewObjectType otype = separator==_SC(',') ? NOT_TABLE : NOT_CLASS;
+        
         while(_token != terminator) {
             SQInteger line = _lex._currentline;
-            #if SQ_LINE_INFO_IN_STRUCTURES
-            if (nkeys < 100)
-              _fs->AddLineInfos(line, false);
-            #endif
             bool isstatic = false;
             //check if is an static
             if(otype == NOT_CLASS) {
@@ -2097,41 +1529,26 @@ public:
                     Lex();
                 }
             }
-            switch(_token) {
+            
+            switch (_token) {
             case TK_FUNCTION:
-            case TK_CONSTRUCTOR:{
+            case TK_CONSTRUCTOR: {
                 SQInteger tk = _token;
                 Lex();
-                Id *funcName = NULL;
-                SQObject id = tk == TK_FUNCTION ? Expect(TK_IDENTIFIER, (Expr **)&funcName) : _fs->CreateString(_SC("constructor"));
-                SQChar *lit = _stringval(id);
-                if (!funcName) { funcName = new Id(_SC("constructor")); }
-                LiteralExpr *key = new LiteralExpr(funcName->id());
+                Id *funcName = tk == TK_FUNCTION ? (Id *)Expect(TK_IDENTIFIER) : newNode<Id>(_SC("constructor"));
+                LiteralExpr *key = newNode<LiteralExpr>(funcName->id());
                 key->setLinePos(line);
-                CheckMemberUniqueness(*memberConstantKeys, id);
                 Expect(_SC('('));
-                _fs->AddInstruction(_OP_LOAD, _fs->PushTarget(), _fs->GetConstant(id));
                 FunctionDecl *f = CreateFunction(funcName, false, tk == TK_CONSTRUCTOR);
-                _fs->AddInstruction(_OP_CLOSURE, _fs->PushTarget(), _fs->_functions.size() - 1, 0);
                 decl->addMember(key, f, isstatic);
             }
             break;
             case _SC('['): {
                 Lex();
 
-                SQObjectPtr firstId;
-                SQUnsignedInteger prevInstrSize = _fs->_instructions.size();
-                if (_token == TK_STRING_LITERAL)
-                    firstId = _fs->CreateString(_lex._svalue,_lex._longstr.size()-1);
-                else if (_token == TK_INTEGER)
-                    firstId = SQObjectPtr(_lex._nvalue);
                 Expr *key = Expression(SQE_RVALUE);
                 key->setLinePos(line);
-                if (!sq_isnull(firstId) && _fs->_instructions.size() == prevInstrSize+1) {
-                    unsigned char op = _fs->_instructions.back().op;
-                    if (op == _OP_LOAD || op == _OP_LOADINT)
-                        CheckMemberUniqueness(*memberConstantKeys, firstId);
-                }
+
                 Expect(_SC(']'));
                 Expect(_SC('='));
                 Expr *value = Expression(SQE_RVALUE);
@@ -2139,158 +1556,88 @@ public:
                 break;
             }
             case TK_STRING_LITERAL: //JSON
-                if(otype == NOT_TABLE) { //only works for tables
-                    SQObject id = Expect(TK_STRING_LITERAL);
-                    SQChar *lit = _stringval(id);
-                    LiteralExpr *key = new LiteralExpr(lit);
+                if (otype == NOT_TABLE) { //only works for tables
+                    LiteralExpr *key = (LiteralExpr *)Expect(TK_STRING_LITERAL);
                     key->setLinePos(line);
-                    CheckMemberUniqueness(*memberConstantKeys, id);
-                    _fs->AddInstruction(_OP_LOAD, _fs->PushTarget(), _fs->GetConstant(id));
-                    Expect(_SC(':')); 
+                    Expect(_SC(':'));
                     Expr *expr = Expression(SQE_RVALUE);
                     decl->addMember(key, expr, isstatic);
                     break;
                 }  //-V796
-            default : {
-                Id *idExpr = NULL;
-                SQObject id = Expect(TK_IDENTIFIER, (Expr **)&idExpr);
-                SQChar *lit = _stringval(id);
-                LiteralExpr *key = new LiteralExpr(lit);
+            default: {
+                Id *id = (Id *)Expect(TK_IDENTIFIER);
+                LiteralExpr *key = newNode<LiteralExpr>(id->id());
                 key->setLinePos(line);
-                CheckMemberUniqueness(*memberConstantKeys, id);
-                _fs->AddInstruction(_OP_LOAD, _fs->PushTarget(), _fs->GetConstant(id));
-                // TODO:
                 if ((otype == NOT_TABLE) &&
                     (_token == TK_IDENTIFIER || _token == separator || _token == terminator || _token == _SC('[')
                         || _token == TK_FUNCTION)) {
-                    SQObject constant;
-                    SQInteger pos = -1;
-                    bool assignable = false;
-                    //Id *idExpr = new Id(id);
-                    decl->addMember(key, idExpr, isstatic);
-                    if((pos = _fs->GetLocalVariable(id, assignable)) != -1)
-                        _fs->PushTarget(pos);
-                    else if((pos = _fs->GetOuterVariable(id,assignable)) != -1)
-                        _fs->AddInstruction(_OP_GETOUTER, _fs->PushTarget(), pos);
-                    else if(IsConstant(id, constant))
-                        _fs->AddInstruction(_OP_LOAD,_fs->PushTarget(),_fs->GetConstant(constant));
-                    else
-                        Error(_SC("Invalid slot initializer '%s' - no such variable/constant or incorrect expression"), _stringval(id));
+                    decl->addMember(key, id, isstatic);
                 }
                 else {
-                    Expect(_SC('=')); 
+                    Expect(_SC('='));
                     Expr *expr = Expression(SQE_RVALUE);
                     decl->addMember(key, expr, isstatic);
                 }
             }
             }
-            if(_token == separator) Lex();//optional comma/semicolon
-            nkeys++;
-            SQInteger val = _fs->PopTarget();
-            SQInteger key = _fs->PopTarget();
-            unsigned char flags = isstatic ? NEW_SLOT_STATIC_FLAG : 0;
-            SQInteger table = _fs->TopTarget(); //<<BECAUSE OF THIS NO COMMON EMIT FUNC IS POSSIBLE
-            if (otype == NOT_TABLE) {
-                _fs->AddInstruction(_OP_NEWSLOT, 0xFF, table, key, val);
-            }
-            else {
-                _fs->AddInstruction(_OP_NEWSLOTA, flags, table, key, val); //this for classes only as it invokes _newmember
-            }
+            if (_token == separator) Lex(); //optional comma/semicolon
         }
-        if(otype==NOT_TABLE)
-            _fs->SetInstructionParam(tpos, 1, nkeys);
-        Lex();
-        delete memberConstantKeys;
-        _member_constant_keys_check.pop_back();
-    }
-    void CheckDuplicateLocalIdentifier(const SQObject &name, const SQChar *desc, bool ignore_global_consts)
-    {
-        bool assignable = false;
-        if (_fs->GetLocalVariable(name, assignable) >= 0)
-            Error(_SC("%s name '%s' conflicts with existing local variable"), desc, _string(name)->_val);
-        if (_stringval(name) == _stringval(_fs->_name))
-            Error(_SC("%s name '%s' conflicts with function name"), desc, _stringval(name));
 
-        SQObject constant;
-        if (ignore_global_consts ? IsLocalConstant(name, constant) : IsConstant(name, constant))
-            Error(_SC("%s name '%s' conflicts with existing constant/enum/import"), desc, _stringval(name));
+        Lex();
     }
+
+    //void CheckDuplicateLocalIdentifier(const SQChar *name, const SQChar *desc, bool ignore_global_consts)
+    //{
+    //}
+
     Decl *parseLocalDeclStatement(bool assignable)
     {
         SQObject varname;
         Lex();
         if( _token == TK_FUNCTION) {
             Lex();
-            Id *idExpr = NULL;
-            varname = Expect(TK_IDENTIFIER, (Expr **)&idExpr);
-            CheckDuplicateLocalIdentifier(varname, _SC("Function"), false);
+            Id *varname = (Id *)Expect(TK_IDENTIFIER);
             Expect(_SC('('));
-            FunctionDecl *f = CreateFunction(idExpr, false);
-            _fs->AddInstruction(_OP_CLOSURE, _fs->PushTarget(), _fs->_functions.size() - 1, 0);
-            _fs->PopTarget();
-            _fs->PushLocalVariable(varname, assignable);
+            FunctionDecl *f = CreateFunction(varname, false);
             f->setContext(DC_LOCAL);
-            return new VarDecl(idExpr, new DeclExpr(f), assignable);
-            //return f;
+            return newNode<VarDecl>(varname, newNode<DeclExpr>(f), assignable);
         } else if (_token == TK_CLASS) {
             Lex();
-            Id *idExpr = NULL;
-            varname = Expect(TK_IDENTIFIER, (Expr **)&idExpr);
-            CheckDuplicateLocalIdentifier(varname, _SC("Class"), false);
+            Id *varname = (Id *)Expect(TK_IDENTIFIER);
             ClassDecl *c = ClassExp(NULL);
             c->setContext(DC_LOCAL);
-            _fs->PopTarget();
-            _fs->PushLocalVariable(varname, assignable);
-            return new VarDecl(idExpr, new DeclExpr(c), assignable);
-            //return c;
+            return newNode<VarDecl>(varname, newNode<DeclExpr>(c), assignable);
         }
 
         DeclGroup *decls = NULL;
         DesctructionDecl *dd = NULL;
         Decl *decl = NULL;
         SQInteger destructurer = 0;
+
         if (_token == _SC('{') || _token == _SC('[')) {
             destructurer = _token;
             Lex();
-            decls = dd = new DesctructionDecl(_ss(_vm)->_alloc_ctx, destructurer == _SC('{') ? DT_TABLE : DT_ARRAY);
+            decls = dd = newNode<DesctructionDecl>(arena(), destructurer == _SC('{') ? DT_TABLE : DT_ARRAY);
         }
 
-        sqvector<SQInteger> targets(_ss(_vm)->_alloc_ctx);
-        sqvector<SQInteger> flags(_ss(_vm)->_alloc_ctx);
-        SQObjectPtrVec names(_ss(_vm)->_alloc_ctx);
-
-
         do {
-            Id *idExpr = NULL;
-            varname = Expect(TK_IDENTIFIER, (Expr**)&idExpr);
-            CheckDuplicateLocalIdentifier(varname, assignable ? _SC("Local variable") : _SC("Named binding"), false);
+            Id *varname = (Id *)Expect(TK_IDENTIFIER);
             VarDecl *cur = NULL;
             if(_token == _SC('=')) {
                 Lex(); 
                 Expr *expr = Expression(SQE_REGULAR);
-                SQInteger src = _fs->PopTarget();
-                SQInteger dest = _fs->PushTarget();
-                if(dest != src) _fs->AddInstruction(_OP_MOVE, dest, src);
-                flags.push_back(OP_GET_FLAG_NO_ERROR | OP_GET_FLAG_KEEP_VAL);
-                cur = new VarDecl(idExpr, expr, assignable);
+                cur = newNode<VarDecl>(varname, expr, assignable);
             }
             else {
                 if (!assignable && !destructurer)
-                    Error(_SC("Binding '%s' must be initialized"), _stringval(varname));
-                _fs->AddInstruction(_OP_LOADNULLS, _fs->PushTarget(),1);
-                flags.push_back(0);
-                cur = new VarDecl(idExpr, NULL, assignable);
-                //assert(dd);
-                //dd->addName(new Id(varname));
+                    Error(_SC("Binding '%s' must be initialized"), varname->id());
+                cur = newNode<VarDecl>(varname, nullptr, assignable);
             }
-            targets.push_back(_fs->PopTarget());
-            _fs->PushLocalVariable(varname, assignable);
-            names.push_back(varname);
 
             if (decls) {
                 decls->addDeclaration(cur);
             } else if (decl) {
-                decls = new DeclGroup(_ss(_vm)->_alloc_ctx);
+                decls = newNode<DeclGroup>(arena());
                 decls->addDeclaration(static_cast<VarDecl *>(decl));
                 decls->addDeclaration(cur);
                 decl = decls;
@@ -2321,68 +1668,42 @@ public:
             Expect(destructurer==_SC('[') ? _SC(']') : _SC('}'));
             Expect(_SC('='));
             dd->setExpression(Expression(SQE_RVALUE));
-            SQInteger src = _fs->TopTarget();
-            SQInteger key_pos = _fs->PushTarget();
-            if (destructurer == _SC('[')) {
-                for (SQUnsignedInteger i=0; i<targets.size(); ++i) {
-                    EmitLoadConstInt(i, key_pos);
-                    _fs->AddInstruction(_OP_GET, targets[i], src, key_pos, flags[i]);
-                }
-            }
-            else {
-                for (SQUnsignedInteger i=0; i<targets.size(); ++i) {
-                    _fs->AddInstruction(_OP_LOAD, key_pos, _fs->GetConstant(names[i]));
-                    _fs->AddInstruction(_OP_GET, targets[i], src, key_pos, flags[i]);
-                }
-            }
-            _fs->PopTarget();
-            _fs->PopTarget();
             return dd;
         } else {
             return decls ? static_cast<Decl*>(decls) : decl;
         }
     }
+
     Statement *IfBlock()
     {
         Statement *stmt = NULL;
         if (_token == _SC('{'))
         {
-            BEGIN_SCOPE();
             Lex();
-            stmt = Statements();
+            stmt = parseStatements();
             Expect(_SC('}'));
-            END_SCOPE();
         }
         else {
-            BEGIN_SCOPE();
             stmt = parseStatement();
-            Block *block = new Block(_ss(_vm)->_alloc_ctx);
+            Block *block = newNode<Block>(arena());
             block->addStatement(stmt);
             stmt = block;
             if (_lex._prevtoken != _SC('}') && _lex._prevtoken != _SC(';')) OptionalSemicolon();
-            END_SCOPE();
         }
 
         return stmt;
     }
+
     IfStatement *parseIfStatement()
     {
-        BEGIN_SCOPE();
+        Consume(TK_IF);
 
-        SQInteger jmppos;
-        bool haselse = false;
-
-        Lex();
         Expect(_SC('('));
         Expr *cond = Expression(SQE_IF);
         Expect(_SC(')'));
-        
-        _fs->AddInstruction(_OP_JZ, _fs->PopTarget());
-        SQInteger jnepos = _fs->GetCurrentPos();
-
-
 
         Statement *thenB = IfBlock();
+        
         //
         /*static int n = 0;
         if (_token != _SC('}') && _token != TK_ELSE) {
@@ -2395,332 +1716,185 @@ public:
             //OptionalSemicolon();
         }*/
 
-
-        SQInteger endifblock = _fs->GetCurrentPos();
         Statement *elseB = NULL;
         if(_token == TK_ELSE){
-            haselse = true;
-            //BEGIN_SCOPE();
-            _fs->AddInstruction(_OP_JMP);
-            jmppos = _fs->GetCurrentPos();
             Lex();
-            //Statement(); if(_lex._prevtoken != _SC('}')) OptionalSemicolon();
             elseB = IfBlock();
-            //END_SCOPE();
-            _fs->SetInstructionParam(jmppos, 1, _fs->GetCurrentPos() - jmppos);
         }
-        _fs->SetInstructionParam(jnepos, 1, endifblock - jnepos + (haselse?1:0));
-        END_SCOPE();
-        return new IfStatement(cond, thenB, elseB);
+        
+        return newNode<IfStatement>(cond, thenB, elseB);
     }
+
     WhileStatement *parseWhileStatement()
     {
-        Expr *cond = NULL;
-        Statement *body = NULL;
-        BEGIN_SCOPE();
-        {
+        Consume(TK_WHILE);
 
-        SQInteger jzpos, jmppos;
-        jmppos = _fs->GetCurrentPos();
-        Lex();
         Expect(_SC('(')); 
-        cond = Expression(SQE_LOOP_CONDITION);
+        Expr *cond = Expression(SQE_LOOP_CONDITION);
         Expect(_SC(')'));
 
-        BEGIN_BREAKBLE_BLOCK();
-        _fs->AddInstruction(_OP_JZ, _fs->PopTarget());
-        jzpos = _fs->GetCurrentPos();
-        BEGIN_SCOPE();
+        Statement *body = parseStatement();
 
-        body = parseStatement();
-
-        END_SCOPE();
-        _fs->AddInstruction(_OP_JMP, 0, jmppos - _fs->GetCurrentPos() - 1);
-        _fs->SetInstructionParam(jzpos, 1, _fs->GetCurrentPos() - jzpos);
-
-        END_BREAKBLE_BLOCK(jmppos);
-
-        }
-        END_SCOPE();
-
-        return new WhileStatement(cond, body);
+        return newNode<WhileStatement>(cond, body);
     }
+
     DoWhileStatement *parseDoWhileStatement()
     {
-        Expr *cond = NULL;
-        Statement *body = NULL;
-        BEGIN_SCOPE();
-        {
-
-        Lex();
-        SQInteger jmptrg = _fs->GetCurrentPos();
-        BEGIN_BREAKBLE_BLOCK()
-        BEGIN_SCOPE();
-        body = parseStatement();
-        END_SCOPE();
+        Consume(TK_DO); // DO
+        
+        Statement *body = parseStatement();
+        
         Expect(TK_WHILE);
-        SQInteger continuetrg = _fs->GetCurrentPos();
+        
         Expect(_SC('('));
-        cond = Expression(SQE_LOOP_CONDITION);
+        Expr *cond = Expression(SQE_LOOP_CONDITION);
         Expect(_SC(')'));
-        _fs->AddInstruction(_OP_JZ, _fs->PopTarget(), 1);
-        _fs->AddInstruction(_OP_JMP, 0, jmptrg - _fs->GetCurrentPos() - 1);
-        END_BREAKBLE_BLOCK(continuetrg);
-
-        }
-        END_SCOPE();
-        return new DoWhileStatement(body, cond);
+        
+        return newNode<DoWhileStatement>(body, cond);
     }
+
     ForStatement *parseForStatement()
     {
-        Node *init = NULL;
-        Expr *cond = NULL, *mod = NULL;
-        Statement *body = NULL;
-        Lex();
-        BEGIN_SCOPE();
+        Consume(TK_FOR);
+        
         Expect(_SC('('));
-        if(_token == TK_LOCAL) init = parseLocalDeclStatement(true);
-        else if(_token != _SC(';')){
+        
+        Node *init = NULL;
+        if (_token == TK_LOCAL) init = parseLocalDeclStatement(true);
+        else if (_token != _SC(';')) {
             // TODO:
             init = parseCommaExpr(SQE_REGULAR);
-            _fs->PopTarget();
         }
         Expect(_SC(';'));
-        _fs->SnoozeOpt();
-        SQInteger jmppos = _fs->GetCurrentPos();
-        SQInteger jzpos = -1;
-        if(_token != _SC(';')) { cond = Expression(SQE_LOOP_CONDITION); _fs->AddInstruction(_OP_JZ, _fs->PopTarget()); jzpos = _fs->GetCurrentPos(); }
+        
+        Expr *cond = NULL;
+        if(_token != _SC(';')) { 
+            cond = Expression(SQE_LOOP_CONDITION); 
+        }
         Expect(_SC(';'));
-        _fs->SnoozeOpt();
-        SQInteger expstart = _fs->GetCurrentPos() + 1;
+        
+        Expr *mod = NULL;
         if(_token != _SC(')')) {
             mod = parseCommaExpr(SQE_REGULAR);
-            _fs->PopTarget();
         }
         Expect(_SC(')'));
-        _fs->SnoozeOpt();
-        SQInteger expend = _fs->GetCurrentPos();
-        SQInteger expsize = (expend - expstart) + 1;
-        SQInstructionVec exp(_fs->_sharedstate->_alloc_ctx);
-        if(expsize > 0) {
-            for(SQInteger i = 0; i < expsize; i++)
-                exp.push_back(_fs->GetInstruction(expstart + i));
-            _fs->PopInstructions(expsize);
-        }
-        BEGIN_BREAKBLE_BLOCK()
-        body = parseStatement();
-        SQInteger continuetrg = _fs->GetCurrentPos();
-        if(expsize > 0) {
-            for(SQInteger i = 0; i < expsize; i++)
-                _fs->AddInstruction(exp[i]);
-        }
-        _fs->AddInstruction(_OP_JMP, 0, jmppos - _fs->GetCurrentPos() - 1, 0);
-        if(jzpos>  0) _fs->SetInstructionParam(jzpos, 1, _fs->GetCurrentPos() - jzpos);
+        
+        Statement *body = parseStatement();
 
-        END_BREAKBLE_BLOCK(continuetrg);
-
-        END_SCOPE();
-
-        return new ForStatement(init, cond, mod, body);
+        return newNode<ForStatement>(init, cond, mod, body);
     }
 
     ForeachStatement *parseForEachStatement()
     {
-        Id *idx = NULL, *val = NULL;
-        Expr *contnr = NULL;
-        Statement *body = NULL;
-        SQObject idxname, valname;
-        Lex(); Expect(_SC('(')); valname = Expect(TK_IDENTIFIER, (Expr **)&idx);
-        CheckDuplicateLocalIdentifier(valname, _SC("Iterator"), false);
+        Consume(TK_FOREACH);
 
+        Expect(_SC('(')); 
+        Id *valname = (Id *)Expect(TK_IDENTIFIER);
+
+        Id *idxname = NULL;
         if(_token == _SC(',')) {
             idxname = valname;
-            Lex(); valname = Expect(TK_IDENTIFIER, (Expr **)&val);
-            CheckDuplicateLocalIdentifier(valname, _SC("Iterator"), false);
-            if (_stringval(idxname) == _stringval(valname))
-                Error(_SC("foreach() key and value names are the same: %s"), _stringval(valname));
+            Lex();
+            valname = (Id *)Expect(TK_IDENTIFIER);
+
+            if (strcmp(idxname->id(), valname->id()) == 0)
+                Error(_SC("foreach() key and value names are the same: %s"), valname->id());
         }
-        else{
-            idxname = _fs->CreateString(_SC("@INDEX@"));
+        else {
+            idxname = newNode<Id>(_SC("@INDEX@"));
         }
+
         Expect(TK_IN);
 
-        //save the stack size
-        BEGIN_SCOPE();
-        //put the table in the stack(evaluate the table expression)
-        contnr = Expression(SQE_RVALUE);
+        Expr *contnr = Expression(SQE_RVALUE);
         Expect(_SC(')'));
-        SQInteger container = _fs->TopTarget();
-        //push the index local var
-        SQInteger indexpos = _fs->PushLocalVariable(idxname, false);
-        _fs->AddInstruction(_OP_LOADNULLS, indexpos,1);
-        //push the value local var
-        SQInteger valuepos = _fs->PushLocalVariable(valname, false);
-        _fs->AddInstruction(_OP_LOADNULLS, valuepos,1);
-        //push reference index
-        SQInteger itrpos = _fs->PushLocalVariable(_fs->CreateString(_SC("@ITERATOR@")), false); //use invalid id to make it inaccessible
-        _fs->AddInstruction(_OP_LOADNULLS, itrpos,1);
-        SQInteger jmppos = _fs->GetCurrentPos();
-        _fs->AddInstruction(_OP_FOREACH, container, 0, indexpos);
-        SQInteger foreachpos = _fs->GetCurrentPos();
-        _fs->AddInstruction(_OP_POSTFOREACH, container, 0, indexpos);
-        //generate the statement code
-        BEGIN_BREAKBLE_BLOCK()
-        body = parseStatement();
-        _fs->AddInstruction(_OP_JMP, 0, jmppos - _fs->GetCurrentPos() - 1);
-        _fs->SetInstructionParam(foreachpos, 1, _fs->GetCurrentPos() - foreachpos);
-        _fs->SetInstructionParam(foreachpos + 1, 1, _fs->GetCurrentPos() - foreachpos);
-        END_BREAKBLE_BLOCK(foreachpos - 1);
-        //restore the local variable stack(remove index,val and ref idx)
-        _fs->PopTarget();
-        END_SCOPE();
 
-        return new ForeachStatement(idx, val, contnr, body);
+        Statement *body = parseStatement();
+
+        return newNode<ForeachStatement>(idxname, valname, contnr, body);
     }
+
     SwitchStatement *parseSwitchStatement()
     {
-        SwitchStatement *switchStmt = NULL;
-        BEGIN_SCOPE();
-        Lex();
+        Consume(TK_SWITCH);
+
         Expect(_SC('('));
-        switchStmt = new SwitchStatement(_ss(_vm)->_alloc_ctx, Expression(SQE_SWITCH));
+        Expr *switchExpr = Expression(SQE_SWITCH);
         Expect(_SC(')'));
+
         Expect(_SC('{'));
-        SQInteger expr = _fs->TopTarget();
-        bool bfirst = true;
-        SQInteger tonextcondjmp = -1;
-        SQInteger skipcondjmp = -1;
-        SQInteger __nbreaks__ = _fs->_unresolvedbreaks.size();
-        _fs->_breaktargets.push_back(0);
-        _fs->_blockstacksizes.push_back(_scope.stacksize);
+
+        SwitchStatement *switchStmt = newNode<SwitchStatement>(arena(), switchExpr);
+
         while(_token == TK_CASE) {
-            if(!bfirst) {
-                _fs->AddInstruction(_OP_JMP, 0, 0);
-                skipcondjmp = _fs->GetCurrentPos();
-                _fs->SetInstructionParam(tonextcondjmp, 1, _fs->GetCurrentPos() - tonextcondjmp);
-            }
-            //condition
-            Lex(); 
+            Consume(TK_CASE);
+
             Expr *cond = Expression(SQE_RVALUE);
             Expect(_SC(':'));
-            SQInteger trg = _fs->PopTarget();
-            SQInteger eqtarget = trg;
-            bool local = _fs->IsLocal(trg);
-            if(local) {
-                eqtarget = _fs->PushTarget(); //we need to allocate a extra reg
-            }
-            _fs->AddInstruction(_OP_EQ, eqtarget, trg, expr);
-            _fs->AddInstruction(_OP_JZ, eqtarget, 0);
-            if(local) {
-                _fs->PopTarget();
-            }
-
-            //end condition
-            if(skipcondjmp != -1) {
-                _fs->SetInstructionParam(skipcondjmp, 1, (_fs->GetCurrentPos() - skipcondjmp));
-            }
-            tonextcondjmp = _fs->GetCurrentPos();
-            BEGIN_SCOPE();
-            Statement *stmt = Statements();
-            switchStmt->addCases(cond, stmt);
-            END_SCOPE();
-            bfirst = false;
+            
+            Statement *caseBody = parseStatements();
+            switchStmt->addCases(cond, caseBody);
         }
-        if(tonextcondjmp != -1)
-            _fs->SetInstructionParam(tonextcondjmp, 1, _fs->GetCurrentPos() - tonextcondjmp);
+        
         if(_token == TK_DEFAULT) {
-            Lex(); Expect(_SC(':'));
-            BEGIN_SCOPE();
-            switchStmt->addDefault(Statements());
-            END_SCOPE();
+            Consume(TK_DEFAULT);
+            Expect(_SC(':'));
+            
+            switchStmt->addDefault(parseStatements());
         }
+
         Expect(_SC('}'));
-        _fs->PopTarget();
-        __nbreaks__ = _fs->_unresolvedbreaks.size() - __nbreaks__;
-        if(__nbreaks__ > 0)ResolveBreaks(_fs, __nbreaks__);
-        _fs->_breaktargets.pop_back();
-        _fs->_blockstacksizes.pop_back();
-        END_SCOPE();
 
         return switchStmt;
     }
+
     FunctionDecl *parseFunctionStatement()
     {
-        SQObject id;
-        Id *funcName = NULL;
-        Lex(); id = Expect(TK_IDENTIFIER, (Expr**)&funcName);
-        _fs->PushTarget(0);
-        _fs->AddInstruction(_OP_LOAD, _fs->PushTarget(), _fs->GetConstant(id));
+        Consume(TK_FUNCTION); 
+        Id *funcName = (Id *)Expect(TK_IDENTIFIER);
         Expect(_SC('('));
-        FunctionDecl *f = CreateFunction(funcName);
-        _fs->AddInstruction(_OP_CLOSURE, _fs->PushTarget(), _fs->_functions.size() - 1, 0);
-        EmitDerefOp(_OP_NEWSLOT);
-        _fs->PopTarget();
-        return f;
+        return CreateFunction(funcName);
     }
+
     ClassDecl *parseClassStatement()
     {
-        SQExpState es;
-        Lex();
-        es = _es;
-        _es.donot_get = true;
-        Expr *key = PrefixedExpr();
-        ClassDecl *decl = NULL;
-        if(_es.etype == EXPR) {
-            Error(_SC("invalid class name"));
-        }
-        else if(_es.etype == OBJECT || _es.etype == BASE) {
-            decl = ClassExp(key);
-            decl->setContext(DC_SLOT);
-            EmitDerefOp(_OP_NEWSLOT);
-            _fs->PopTarget();
-        }
-        else {
-            Error(_SC("cannot create a class in a local with the syntax(class <local>)"));
-        }
-        _es = es;
+        Consume(TK_CLASS);
 
-        return decl;
+        Expr *key = PrefixedExpr();
+        
+        ClassDecl *klass = ClassExp(key);
+        klass->setContext(DC_SLOT);
+
+        return klass;
     }
-    SQObject ExpectScalar(LiteralExpr **r)
+
+    LiteralExpr *ExpectScalar()
     {
-        SQObject val;
-        val._type = OT_NULL; val._unVal.nInteger = 0; //shut up GCC 4.x
-        val._flags = 0;
+        LiteralExpr *ret = NULL;
+
         switch(_token) {
             case TK_INTEGER:
-                val._type = OT_INTEGER;
-                val._unVal.nInteger = _lex._nvalue;
-                *r = new LiteralExpr(_lex._nvalue);
+                ret = newNode<LiteralExpr>(_lex._nvalue);
                 break;
             case TK_FLOAT:
-                val._type = OT_FLOAT;
-                val._unVal.fFloat = _lex._fvalue;
-                *r = new LiteralExpr(_lex._fvalue);
+                ret = newNode<LiteralExpr>(_lex._fvalue);
                 break;
             case TK_STRING_LITERAL:
-                val = _fs->CreateString(_lex._svalue,_lex._longstr.size()-1);
-                *r = new LiteralExpr(_lex._svalue);
+                ret = newStringLiteral(_lex._svalue);
                 break;
             case TK_TRUE:
             case TK_FALSE:
-                val._type = OT_BOOL;
-                val._unVal.nInteger = _token == TK_TRUE ? 1 : 0;
-                *r = new LiteralExpr((bool)(_token == TK_TRUE ? 1 : 0));
+                ret = newNode<LiteralExpr>((bool)(_token == TK_TRUE ? 1 : 0));
                 break;
             case '-':
                 Lex();
                 switch(_token)
                 {
                 case TK_INTEGER:
-                    val._type = OT_INTEGER;
-                    val._unVal.nInteger = -_lex._nvalue;
-                    *r = new LiteralExpr(-_lex._nvalue);
+                    ret = newNode<LiteralExpr>(-_lex._nvalue);
                 break;
                 case TK_FLOAT:
-                    val._type = OT_FLOAT;
-                    val._unVal.fFloat = -_lex._fvalue;
-                    *r = new LiteralExpr(-_lex._fvalue);
+                    ret = newNode<LiteralExpr>(-_lex._fvalue);
                 break;
                 default:
                     Error(_SC("scalar expected : integer, float"));
@@ -2730,279 +1904,169 @@ public:
                 Error(_SC("scalar expected : integer, float, or string"));
         }
         Lex();
-        return val;
-    }
-
-    SQTable* GetScopedConstsTable()
-    {
-        assert(!_scopedconsts.empty());
-        SQObjectPtr &consts = _scopedconsts.top();
-        if (sq_type(consts) != OT_TABLE)
-            consts = SQTable::Create(_ss(_vm), 0);
-        return _table(consts);
+        return ret;
     }
 
     ConstDecl *parseConstStatement(bool global)
     {
         Lex();
-        Id *idExpr = NULL;
-        SQObject id = Expect(TK_IDENTIFIER, (Expr**)&idExpr);
-        bool ignoreGlobalConst = global && !(_fs->lang_features & LF_FORBID_GLOBAL_CONST_REWRITE);
-        CheckDuplicateLocalIdentifier(id, _SC("Constant"), ignoreGlobalConst);
+        Id *id = (Id *)Expect(TK_IDENTIFIER);
+        bool ignoreGlobalConst = global && !(_lang_features & LF_FORBID_GLOBAL_CONST_REWRITE);
 
         Expect('=');
-        LiteralExpr *valExpr = NULL;
-        SQObject val = ExpectScalar(&valExpr);
+        LiteralExpr *valExpr = ExpectScalar();
         OptionalSemicolon();
 
-        SQTable *enums = global ? _table(_ss(_vm)->_consts) : GetScopedConstsTable();
-
-        SQObjectPtr strongid = id;
-        enums->NewSlot(strongid,SQObjectPtr(val));
-        strongid.Null();
-
-        return new ConstDecl(idExpr, valExpr, global);
+        return newNode<ConstDecl>(id, valExpr, global);
     }
 
     EnumDecl *parseEnumStatement(bool global)
     {
         Lex();
-        Id *idExpr = NULL;
-        SQObject id = Expect(TK_IDENTIFIER, (Expr**)&idExpr);
-        bool ignoreGlobalConst = global && !(_fs->lang_features & LF_FORBID_GLOBAL_CONST_REWRITE);
-        CheckDuplicateLocalIdentifier(id, _SC("Enum"), ignoreGlobalConst);
+        Id *id = (Id *)Expect(TK_IDENTIFIER);
+        bool ignoreGlobalConst = global && !(_lang_features & LF_FORBID_GLOBAL_CONST_REWRITE);
 
-        EnumDecl *decl = new EnumDecl(_ss(_vm)->_alloc_ctx, idExpr, global);
+        EnumDecl *decl = newNode<EnumDecl>(arena(), id, global);
 
         Expect(_SC('{'));
 
-        SQObject table = _fs->CreateTable();
-        table._flags = SQOBJ_FLAG_IMMUTABLE;
         SQInteger nval = 0;
         while(_token != _SC('}')) {
             Id *keyExpr = NULL;
-            SQObject key = Expect(TK_IDENTIFIER, (Expr **)&keyExpr);
-            SQObject val;
+            Id *key = (Id *)Expect(TK_IDENTIFIER);
             LiteralExpr *valExpr = NULL;
             if(_token == _SC('=')) {
                 Lex();
-                val = ExpectScalar(&valExpr);
+                valExpr = ExpectScalar();
             }
             else {
-                valExpr = new LiteralExpr(nval);
-                val._type = OT_INTEGER;
-                val._unVal.nInteger = nval++;
-                val._flags = 0;
+                valExpr = newNode<LiteralExpr>(nval);
             }
 
             decl->addConst(keyExpr, valExpr);
 
-            _table(table)->NewSlot(SQObjectPtr(key),SQObjectPtr(val));
             if(_token == ',') Lex();
         }
 
-        SQTable *enums = global ? _table(_ss(_vm)->_consts) : GetScopedConstsTable();
-
-        SQObjectPtr strongid = id;
-        enums->NewSlot(SQObjectPtr(strongid),SQObjectPtr(table));
-        strongid.Null();
         Lex();
 
         return decl;
     }
     TryStatement *parseTryCatchStatement()
     {
-        SQObject exid;
-        Statement *t = NULL, *c = NULL;
-        Lex();
-        _fs->AddInstruction(_OP_PUSHTRAP,0,0);
-        _fs->_traps++;
-        if(_fs->_breaktargets.size()) _fs->_breaktargets.top()++;
-        if(_fs->_continuetargets.size()) _fs->_continuetargets.top()++;
-        SQInteger trappos = _fs->GetCurrentPos();
-        {
-            BEGIN_SCOPE();
-            t = parseStatement();
-            END_SCOPE();
-        }
-        _fs->_traps--;
-        _fs->AddInstruction(_OP_POPTRAP, 1, 0);
-        if(_fs->_breaktargets.size()) _fs->_breaktargets.top()--;
-        if(_fs->_continuetargets.size()) _fs->_continuetargets.top()--;
-        _fs->AddInstruction(_OP_JMP, 0, 0);
-        SQInteger jmppos = _fs->GetCurrentPos();
-        _fs->SetInstructionParam(trappos, 1, (_fs->GetCurrentPos() - trappos));
-        Id *exId = NULL;
-        Expect(TK_CATCH); Expect(_SC('(')); exid = Expect(TK_IDENTIFIER, (Expr**)&exId); Expect(_SC(')'));
-        {
-            BEGIN_SCOPE();
-            SQInteger ex_target = _fs->PushLocalVariable(exid, false);
-            _fs->SetInstructionParam(trappos, 0, ex_target);
-            c = parseStatement();
-            _fs->SetInstructionParams(jmppos, 0, (_fs->GetCurrentPos() - jmppos), 0);
-            END_SCOPE();
-        }
-        return new TryStatement(t, exId, c);
+        Consume(TK_TRY);
+        
+        Statement *t = parseStatement();
+        
+        Expect(TK_CATCH);
+        
+        Expect(_SC('('));
+        Id *exid = (Id *)Expect(TK_IDENTIFIER);
+        Expect(_SC(')'));
+
+        Statement *c = parseStatement();
+        
+        return newNode<TryStatement>(t, exid, c);
     }
 
-    SQObject generateSurrogateFunctionName(Id **id)
+    Id *generateSurrogateFunctionName()
     {
-        const SQChar * fileName = (sq_type(_sourcename) == OT_STRING) ? _stringval(_sourcename) : _SC("unknown");
+        const SQChar * fileName = _sourcename ? _sourcename : _SC("unknown");
         int lineNum = int(_lex._currentline);
 
         const SQChar * rightSlash = std::max(scstrrchr(fileName, _SC('/')), scstrrchr(fileName, _SC('\\')));
 
         SQChar buf[MAX_FUNCTION_NAME_LEN];
         scsprintf(buf, MAX_FUNCTION_NAME_LEN, _SC("(%s:%d)"), rightSlash ? (rightSlash + 1) : fileName, lineNum);
-        *id = new Id(buf);
-        return _fs->CreateString(buf);
+        return newId(buf);
     }
 
     DeclExpr *FunctionExp(SQInteger ftype,bool lambda = false)
     {
         Lex();
-        Id *funcName = NULL;
-        SQObject functionName = (_token == TK_IDENTIFIER) ? Expect(TK_IDENTIFIER, (Expr**)&funcName) : generateSurrogateFunctionName(&funcName);
+        Id *funcName = (_token == TK_IDENTIFIER) ? (Id *)Expect(TK_IDENTIFIER) : generateSurrogateFunctionName();
         Expect(_SC('('));
 
-        DeclExpr *r = new DeclExpr(CreateFunction(funcName, lambda));
-        _fs->AddInstruction(_OP_CLOSURE, _fs->PushTarget(), _fs->_functions.size() - 1, ftype == TK_FUNCTION?0:1);
-        return r;
+        return newNode<DeclExpr>(CreateFunction(funcName, lambda));
     }
     ClassDecl *ClassExp(Expr *key)
     {
-        SQInteger base = -1;
         Expr *baseExpr = NULL;
         if(_token == TK_EXTENDS) {
             Lex(); 
             baseExpr = Expression(SQE_RVALUE);
-            base = _fs->TopTarget();
         }
         Expect(_SC('{'));
-        if(base != -1) _fs->PopTarget();
-        ClassDecl *d = new ClassDecl(_ss(_vm)->_alloc_ctx, key, baseExpr);
-        _fs->AddInstruction(_OP_NEWOBJ, _fs->PushTarget(), base, 0, NOT_CLASS);
+        ClassDecl *d = newNode<ClassDecl>(arena(), key, baseExpr);
         ParseTableOrClass(d, _SC(';'),_SC('}'));
         return d;
     }
+
     Expr *DeleteExpr()
     {
-        SQExpState es;
         Lex();
-        es = _es;
-        _es.donot_get = true;
         Expr *arg = PrefixedExpr();
-        if(_es.etype==EXPR) Error(_SC("can't delete an expression"));
-        if(_es.etype==BASE) Error(_SC("can't delete 'base'"));
-        if(_es.etype==OBJECT) {
-            Emit2ArgsOP(_OP_DELETE);
-        }
-        else {
-            Error(_SC("cannot delete an (outer) local"));
-        }
-        _es = es;
-        return new UnExpr(TO_DELETE, arg);
+        return newNode<UnExpr>(TO_DELETE, arg);
     }
+
     Expr *PrefixIncDec(SQInteger token)
     {
-        SQExpState  es;
         SQInteger diff = (token==TK_MINUSMINUS) ? -1 : 1;
         Lex();
-        es = _es;
-        _es.donot_get = true;
         Expr *arg = PrefixedExpr();
-        if(_es.etype==EXPR) {
-            Error(_SC("can't '++' or '--' an expression"));
-        }
-        else if (_es.etype == BASE) {
-            Error(_SC("'base' cannot be modified"));
-        }
-        else if(_es.etype==OBJECT) {
-            Emit2ArgsOP(_OP_INC, diff);
-        }
-        else if (_es.isBinding()) {
-            Error(_SC("can't '++' or '--' a binding"));
-        }
-        else if(_es.etype==LOCAL) {
-            SQInteger src = _fs->TopTarget();
-            _fs->AddInstruction(_OP_INCL, src, src, 0, diff);
-
-        }
-        else if(_es.etype==OUTER) {
-            SQInteger tmp = _fs->PushTarget();
-            _fs->AddInstruction(_OP_GETOUTER, tmp, _es.epos);
-            _fs->AddInstruction(_OP_INCL,     tmp, tmp, 0, diff);
-            _fs->AddInstruction(_OP_SETOUTER, tmp, _es.epos, tmp);
-        }
-        _es = es;
-
-        return new IncExpr(arg, diff, IF_PREFIX);
+        return newNode<IncExpr>(arg, diff, IF_PREFIX);
     }
+
     FunctionDecl *CreateFunction(Id *name,bool lambda = false, bool ctor = false)
     {
-        SQFuncState *funcstate = _fs->PushChildState(_ss(_vm));
-        FunctionDecl *f = ctor ? new ConstructorDecl(_ss(_vm)->_alloc_ctx, name) : new FunctionDecl(_ss(_vm)->_alloc_ctx, name);
-        funcstate->_name = name;
-        SQObject paramname;
-        SQObject thisName = _fs->CreateString(_SC("this"));
-        f->addParameter(new Id(_SC("this")));
+        FunctionDecl *f = ctor ? newNode<ConstructorDecl>(arena(), name) : newNode<FunctionDecl>(arena(), name);
+        
+        f->addParameter(newNode<Id>(_SC("this")));
 
-        funcstate->AddParameter(thisName);
-        funcstate->_sourcename = _sourcename;
         SQInteger defparams = 0;
-        while(_token!=_SC(')')) {
-            if(_token == TK_VARPARAMS) {
+        
+        while (_token!=_SC(')')) {
+            if (_token == TK_VARPARAMS) {
                 if(defparams > 0) Error(_SC("function with default parameters cannot have variable number of parameters"));
-                SQObject varargName = _fs->CreateString(_SC("vargv"));
-                funcstate->AddParameter(varargName);
-                f->addParameter(new Id(_SC("vargv")));
+                f->addParameter(newNode<Id>(_SC("vargv")));
                 f->setVararg();
-                funcstate->_varparams = true;
                 Lex();
                 if(_token != _SC(')')) Error(_SC("expected ')'"));
                 break;
             }
             else {
-                Id *paramId = NULL;
-                paramname = Expect(TK_IDENTIFIER, (Expr**)&paramId);
-                funcstate->AddParameter(paramname);
+                Id *paramname = (Id *)Expect(TK_IDENTIFIER);
                 Expr *defVal = NULL;
-                if(_token == _SC('=')) {
+                if (_token == _SC('=')) {
                     Lex();
                     defVal = Expression(SQE_RVALUE);
-                    funcstate->AddDefaultParam(_fs->TopTarget());
                     defparams++;
                 }
                 else {
-                    if(defparams > 0) Error(_SC("expected '='"));
+                    if (defparams > 0) Error(_SC("expected '='"));
                 }
 
-                f->addParameter(paramId, defVal);
+                f->addParameter(paramname, defVal);
 
                 if(_token == _SC(',')) Lex();
                 else if(_token != _SC(')')) Error(_SC("expected ')' or ','"));
             }
         }
+        
         Expect(_SC(')'));
-        for(SQInteger n = 0; n < defparams; n++) {
-            _fs->PopTarget();
-        }
-
-        SQFuncState *currchunk = _fs;
-        _fs = funcstate;
+        
         Block *body = NULL;
         SQInteger startLine = _lex._currentline;
-        if(lambda) {
+
+        if (lambda) {
             SQInteger line = _lex._prevtoken == _SC('\n') ? _lex._lasttokenline : _lex._currentline;
-            _fs->AddLineInfos(line, _lineinfo, true);
             Expr *expr = Expression(SQE_REGULAR);
-            //expr->setLinePos(line);
-            ReturnStatement *retStmt = new ReturnStatement(expr);
+            ReturnStatement *retStmt = newNode<ReturnStatement>(expr);
             retStmt->setLinePos(line);
             retStmt->setIsLambda();
-            body = new Block(_ss(_vm)->_alloc_ctx);
+            body = newNode<Block>(arena());
             body->addStatement(retStmt);
-            _fs->AddInstruction(_OP_RETURN, 1, _fs->PopTarget());}
+        }
         else {
             if (_token != '{')
                 Error(_SC("'{' expected"));
@@ -3011,143 +2075,65 @@ public:
         SQInteger line2 = _lex._prevtoken == _SC('\n') ? _lex._lasttokenline : _lex._currentline;
         body->setStartLine(startLine);
         body->setEndLine(line2);
-        funcstate->AddLineInfos(line2, _lineinfo, true);
-        funcstate->AddInstruction(_OP_RETURN, -1);
 
-        if (!(funcstate->lang_features & LF_DISABLE_OPTIMIZER)) {
-            SQOptimizer opt(*funcstate);
-            opt.optimize();
-        }
         f->setBody(body);
 
-        funcstate->SetStackSize(0);
-
-        SQFunctionProto *func = funcstate->BuildProto();
-#ifdef _DEBUG_DUMP
-        funcstate->Dump(func);
-#endif
-        _fs = currchunk;
-        _fs->_functions.push_back(func);
-        _fs->PopChildState();
-
-        f->setSourceName(_rawsourcename);
+        f->setSourceName(_sourcename);
 
         return f;
     }
-    void ResolveBreaks(SQFuncState *funcstate, SQInteger ntoresolve)
-    {
-        while(ntoresolve > 0) {
-            SQInteger pos = funcstate->_unresolvedbreaks.back();
-            funcstate->_unresolvedbreaks.pop_back();
-            //set the jmp instruction
-            funcstate->SetInstructionParams(pos, 0, funcstate->GetCurrentPos() - pos, 0);
-            ntoresolve--;
-        }
-    }
-    void ResolveContinues(SQFuncState *funcstate, SQInteger ntoresolve, SQInteger targetpos)
-    {
-        while(ntoresolve > 0) {
-            SQInteger pos = funcstate->_unresolvedcontinues.back();
-            funcstate->_unresolvedcontinues.pop_back();
-            //set the jmp instruction
-            funcstate->SetInstructionParams(pos, 0, targetpos - pos, 0);
-            ntoresolve--;
-        }
-    }
 
-    bool CanBeDefaultDelegate(const SQObjectPtr &key)
-    {
-        if (sq_type(key) != OT_STRING)
-            return false;
-
-        // this can be optimized by keeping joined list/table of used keys
-        SQTable *delegTbls[] = {
-            _table(_fs->_sharedstate->_table_default_delegate),
-            _table(_fs->_sharedstate->_array_default_delegate),
-            _table(_fs->_sharedstate->_string_default_delegate),
-            _table(_fs->_sharedstate->_number_default_delegate),
-            _table(_fs->_sharedstate->_generator_default_delegate),
-            _table(_fs->_sharedstate->_closure_default_delegate),
-            _table(_fs->_sharedstate->_thread_default_delegate),
-            _table(_fs->_sharedstate->_class_default_delegate),
-            _table(_fs->_sharedstate->_instance_default_delegate),
-            _table(_fs->_sharedstate->_weakref_default_delegate),
-            _table(_fs->_sharedstate->_userdata_default_delegate)
-        };
-        SQObjectPtr tmp;
-        for (SQInteger i=0; i<sizeof(delegTbls)/sizeof(delegTbls[0]); ++i) {
-            if (delegTbls[i]->Get(key, tmp))
-                return true;
-        }
-        return false;
-    }
-
-    SQObjectPtr sourcename() { return _sourcename; }
 
 private:
     SQInteger _token;
     SQFuncState *_fs;
-    SQObjectPtr _sourcename;
+    const SQChar *_sourcename;
     SQLexer _lex;
     bool _lineinfo;
     bool _raiseerror;
-    SQExpState   _es;
-    SQScope _scope;
     SQExpressionContext _expression_context;
     SQChar _compilererror[MAX_COMPILER_ERROR_LEN];
     jmp_buf _errorjmp;
     SQVM *_vm;
-    SQObjectPtrVec _scopedconsts;
-    SQUnsignedInteger _num_initial_bindings;
-    sqvector<sqvector<SQObject>*> _member_constant_keys_check;
 };
-
-static void ThrowError(void *ud, const SQChar *s) {
-    SQCompiler *c = (SQCompiler *)ud;
-    c->Error(s);
-}
-
 
 bool Compile(SQVM *vm,SQLEXREADFUNC rg, SQUserPointer up, const HSQOBJECT *bindings, const SQChar *sourcename, SQObjectPtr &out, bool raiseerror, bool lineinfo)
 {
-    SQCompiler p(vm, rg, up, bindings, sourcename, raiseerror, lineinfo);
+    Arena astArena("AST");
+    SQParser p(vm, rg, up, sourcename, &astArena, raiseerror, lineinfo);
 
     if (vm->_on_compile_file)
       vm->_on_compile_file(vm, sourcename);
 
-    RootBlock *r = p.Compile(out);
+    RootBlock *r = p.parse();
 
     RenderVisitor v(std::cout);
-    r->visit(v);
+    v.render(r);
 
     SQFuncState::reset();
 
-    SQFuncState funcstate(_ss(vm), NULL, ThrowError, &p);
-    CodegenVisitor codegen(_ss(vm)->_alloc_ctx, funcstate, bindings, p, vm, p.sourcename(), out);
+    Arena cgArena("Codegen");
+    CodegenVisitor codegen(&cgArena, bindings, vm, sourcename, p._lang_features, lineinfo, raiseerror);
 
-    codegen.generate(r);
+    codegen.generate(r, out);
 
-/*
-    r->visit(codegen);
-
-    codegen.finish(r);
-*/
     return r != NULL;
 }
 
-CodegenVisitor::CodegenVisitor(SQAllocContext ctx, SQFuncState &root_fs, const HSQOBJECT *bindings, SQCompiler &compiler, SQVM *vm, SQObjectPtr sourceName, SQObjectPtr &o) : Visitor(), _fs(&root_fs), _funcState(&root_fs), _compiler(compiler), _scopedconsts(ctx), _vm(*vm), _o(o) {
-    _fs->_name = SQString::Create(_ss(vm), _SC("__main__"));
+CodegenVisitor::CodegenVisitor(Arena *arena, const HSQOBJECT *bindings, SQVM *vm, const SQChar *sourceName, SQInteger lang_fuatures, bool lineinfo, bool raiseerror)
+    : Visitor(),
+    _fs(NULL),
+    _funcState(NULL),
+    _scopedconsts(arena),
+    _sourceName(sourceName),
+    _vm(vm),
+    _donot_get(false),
+    _lineinfo(lineinfo),
+    _raiseerror(raiseerror),
+    _lang_features(lang_fuatures),
+    _arena(arena) {
 
-    _fs->AddParameter(_fs->CreateString(_SC("this")));
-    _fs->AddParameter(_fs->CreateString(_SC("vargv")));
-    _fs->_varparams = true;
-    _fs->_sourcename = sourceName;
-    _fs->lang_features = compiler._lang_features;
-    _stacksize = _fs->GetStackSize();
-
-    _lineinfo = compiler.lineInfo();
-
-    _donot_get = false;
+    _compilererror[0] = _SC('\0');
 
     if (bindings) {
         assert(sq_type(*bindings) == OT_TABLE || sq_type(*bindings) == OT_NULL);
@@ -3159,44 +2145,88 @@ CodegenVisitor::CodegenVisitor(SQAllocContext ctx, SQFuncState &root_fs, const H
 }
 
 void CodegenVisitor::error(const SQChar *s, ...) {
-    SQChar compilererror[MAX_COMPILER_ERROR_LEN] = { 0 };
     va_list vl;
     va_start(vl, s);
-    scvsprintf(compilererror, MAX_COMPILER_ERROR_LEN, s, vl);
+    scvsprintf(_compilererror, MAX_COMPILER_ERROR_LEN, s, vl);
     va_end(vl);
     longjmp(_errorjmp, 1);
 }
 
-void CodegenVisitor::generate(RootBlock *root) {
+void CodegenVisitor::generate(RootBlock *root, SQObjectPtr &out) {
     if (setjmp(_errorjmp) == 0) {
+        
+        SQFuncState funcstate(_ss(_vm), NULL, CodegenVisitor::ThrowError, this);
+        _funcState = _fs = &funcstate;
+
+        _fs->_name = SQString::Create(_ss(_vm), _SC("__main__"));
+        _fs->AddParameter(_fs->CreateString(_SC("this")));
+        _fs->AddParameter(_fs->CreateString(_SC("vargv")));
+        _fs->_varparams = true;
+        _fs->lang_features = _lang_features;
+
+        SQInteger stacksize = _fs->GetStackSize();
+
         root->visit(*this);
-        finish(root);
+
+        _fs->SetStackSize(stacksize);
+        _fs->AddLineInfos(root->endLine(), _lineinfo, true);
+        _fs->AddInstruction(_OP_RETURN, 0xFF);
+
+        if (!(_fs->lang_features & LF_DISABLE_OPTIMIZER)) {
+            SQOptimizer opt(*_fs);
+            opt.optimize();
+        }
+
+        _fs->SetStackSize(0);
+
+        out = _fs->BuildProto();
+
+        _fs->Dump(_funcproto(out));
+
+        _fs = NULL;
     } else {
-        //if (_raiseerror && _ss(_vm)->_compilererrorhandler) {
-        //    _ss(_vm)->_compilererrorhandler(_vm, _compilererror, sq_type(_sourcename) == OT_STRING ? _stringval(_sourcename) : _SC("unknown"),
-        //        _lex._currentline, _lex._currentcolumn);
-        //}
-        //_vm->_lasterror = SQString::Create(_ss(_vm), _compilererror, -1);
-        //CleanupAfterError();
-        //return NULL;
+        _vm->_lasterror = SQString::Create(_ss(_vm), _compilererror, -1);
     }
 }
 
-void CodegenVisitor::finish(RootBlock *root) {
-    _fs->SetStackSize(_stacksize);
-    _fs->AddLineInfos(root->endLine(), _lineinfo, true);
-    _fs->AddInstruction(_OP_RETURN, 0xFF);
+void CodegenVisitor::CheckDuplicateLocalIdentifier(SQObject name, const SQChar *desc, bool ignore_global_consts) {
+    bool assignable = false;
+    if (_fs->GetLocalVariable(name, assignable) >= 0)
+        error(_SC("%s name '%s' conflicts with existing local variable"), desc, _string(name)->_val);
+    if (_stringval(name) == _stringval(_fs->_name))
+        error(_SC("%s name '%s' conflicts with function name"), desc, _stringval(name));
 
-    if (!(_fs->lang_features & LF_DISABLE_OPTIMIZER)) {
-        SQOptimizer opt(*_fs);
-        opt.optimize();
+    SQObject constant;
+    if (ignore_global_consts ? IsLocalConstant(name, constant) : IsConstant(name, constant))
+        error(_SC("%s name '%s' conflicts with existing constant/enum/import"), desc, _stringval(name));
+}
+
+bool CodegenVisitor::CheckMemberUniqueness(sqvector<Expr *> &vec, Expr *obj) {
+
+    if (obj->op() != TO_LITERAL && obj->op() != TO_ID) return true;
+
+    for (SQUnsignedInteger i = 0, n = vec.size(); i < n; ++i) {
+        Expr *vecobj = vec[i];
+        if (vecobj->op() == TO_ID && obj->op() == TO_ID) {
+            if (strcmp(vecobj->asId()->id(), obj->asId()->id()) == 0) {
+                error(_SC("duplicate key '%s'"), obj->asId()->id());
+                return false;
+            }
+            continue;
+        }
+        if (vecobj->op() == TO_LITERAL && obj->op() == TO_LITERAL) {
+            LiteralExpr *a = (LiteralExpr*)vecobj;
+            LiteralExpr *b = (LiteralExpr*)obj;
+            if (a->kind() == b->kind() && a->raw() == b->raw()) {
+                error(_SC("duplicate key"));
+                return false;
+            }
+            continue;
+        }
     }
 
-    _fs->SetStackSize(0);
-
-    _o = _fs->BuildProto();
-
-    _fs->Dump(_funcproto(_o));
+    vec.push_back(obj);
+    return true;
 }
 
 void CodegenVisitor::Emit2ArgsOP(SQOpcode op, SQInteger p3)
@@ -3267,8 +2297,6 @@ void CodegenVisitor::visitBlock(Block *block) {
     BEGIN_SCOPE();
 
     const sqvector<Statement *> &statements = block->statements();
-
-    //if (block->linePos() != -1) _fs->AddLineInfos(block->linePos(), _lineinfo);
 
     for (int i = 0; i < statements.size(); ++i) {
         Statement *stmt = statements[i];
@@ -3391,7 +2419,7 @@ void CodegenVisitor::visitForStatement(ForStatement *forLoop) {
 
     SQInteger expend = _fs->GetCurrentPos();
     SQInteger expsize = (expend - expstart) + 1;
-    SQInstructionVec exp(_fs->_sharedstate->_alloc_ctx);
+    SQInstructionVec exp(_arena);
 
     if (expsize > 0) {
         for (SQInteger i = 0; i < expsize; i++)
@@ -3422,11 +2450,17 @@ void CodegenVisitor::visitForeachStatement(ForeachStatement *foreachLoop) {
     foreachLoop->container()->visit(*this);
 
     SQInteger container = _fs->TopTarget();
-    SQInteger indexpos = _fs->PushLocalVariable(_fs->CreateString(foreachLoop->idx()->id()), false);
+    SQObject idxName = _fs->CreateString(foreachLoop->idx()->id());
+    CheckDuplicateLocalIdentifier(idxName, _SC("Iterator"), false);
+
+    SQInteger indexpos = _fs->PushLocalVariable(idxName, false);
 
     _fs->AddInstruction(_OP_LOADNULLS, indexpos, 1);
 
-    SQInteger valuepos = _fs->PushLocalVariable(_fs->CreateString(foreachLoop->val()->id()), false);
+    SQObject valName = _fs->CreateString(foreachLoop->val()->id());
+    CheckDuplicateLocalIdentifier(valName, _SC("Iterator"), false);
+
+    SQInteger valuepos = _fs->PushLocalVariable(valName, false);
     _fs->AddInstruction(_OP_LOADNULLS, valuepos, 1);
 
     //push reference index
@@ -3552,7 +2586,7 @@ void CodegenVisitor::visitTryStatement(TryStatement *tryStmt) {
 
 void CodegenVisitor::visitBreakStatement(BreakStatement *breakStmt) {
     addLineNumber(breakStmt);
-    if (_fs->_breaktargets.size() <= 0) _compiler.Error(_SC("'break' has to be in a loop block"));
+    if (_fs->_breaktargets.size() <= 0) error(_SC("'break' has to be in a loop block"));
     if (_fs->_breaktargets.top() > 0) {
         _fs->AddInstruction(_OP_POPTRAP, _fs->_breaktargets.top(), 0);
     }
@@ -3563,7 +2597,7 @@ void CodegenVisitor::visitBreakStatement(BreakStatement *breakStmt) {
 
 void CodegenVisitor::visitContinueStatement(ContinueStatement *continueStmt) {
     addLineNumber(continueStmt);
-    if (_fs->_continuetargets.size() <= 0) _compiler.Error(_SC("'continue' has to be in a loop block"));
+    if (_fs->_continuetargets.size() <= 0) error(_SC("'continue' has to be in a loop block"));
     if (_fs->_continuetargets.top() > 0) {
         _fs->AddInstruction(_OP_POPTRAP, _fs->_continuetargets.top(), 0);
     }
@@ -3580,12 +2614,6 @@ void CodegenVisitor::visitTerminateStatement(TerminateStatement *terminator) {
 }
 
 void CodegenVisitor::visitReturnStatement(ReturnStatement *retStmt) {
-    //if (retStmt->isLambdaReturn()) {
-    //    Expr *body = retStmt->argument();
-    //    assert(body && body->linePos() != -1);
-    //    _fs->AddLineInfos(body->linePos(), _lineinfo, true);
-    //}
-
     SQInteger retexp = _fs->GetCurrentPos() + 1;
     visitTerminateStatement(retStmt);
 
@@ -3633,9 +2661,8 @@ void CodegenVisitor::generateTableDecl(TableDecl *tableDecl) {
     bool isKlass = tableDecl->op() == TO_CLASS;
     const auto members = tableDecl->members();
 
-    if (!isKlass) {
-        _fs->AddInstruction(_OP_NEWOBJ, _fs->PushTarget(), members.size(), 0, NOT_TABLE);
-    }
+    sqvector<Expr *> memberConstantKeys(_arena);
+    memberConstantKeys.reserve(members.size());
 
     for (int i = 0; i < members.size(); ++i) {
         const TableMember &m = members[i];
@@ -3644,6 +2671,8 @@ void CodegenVisitor::generateTableDecl(TableDecl *tableDecl) {
             _fs->AddLineInfos(m.key->linePos(), false);
         }
 #endif
+        CheckMemberUniqueness(memberConstantKeys, m.key);
+
         m.key->visit(*this);
         m.value->visit(*this);
         SQInteger val = _fs->PopTarget();
@@ -3661,17 +2690,37 @@ void CodegenVisitor::generateTableDecl(TableDecl *tableDecl) {
 
 void CodegenVisitor::visitTableDecl(TableDecl *tableDecl) {
     addLineNumber(tableDecl);
+    _fs->AddInstruction(_OP_NEWOBJ, _fs->PushTarget(), tableDecl->members().size(), 0, NOT_TABLE);
     generateTableDecl(tableDecl);
+}
+
+void CodegenVisitor::checkClassKey(Expr *key) {
+    switch (key->op())
+    {
+    case TO_GETFIELD:
+    case TO_GETTABLE:
+    case TO_ROOT:
+        return;
+    case TO_ID:
+        if (key->asId()->isField()) {
+            return;
+        }
+    case TO_BASE:
+        error(_SC("cannot create a class in a local with the syntax(class <local>)"));
+    default:
+        error(_SC("invalid class name"));
+        break;
+    }
 }
 
 void CodegenVisitor::visitClassDecl(ClassDecl *klass) {
     addLineNumber(klass);
     if (klass->context() == DC_SLOT) {
         assert(klass->classKey());
-        bool old_dng = _donot_get;
-        _donot_get = true;
-        klass->classKey()->visit(*this);
-        _donot_get = old_dng;
+
+        visitNoGet(klass);
+
+        checkClassKey(klass->classKey());
     }
 
     Expr *baseExpr = klass->classBase();
@@ -3684,7 +2733,6 @@ void CodegenVisitor::visitClassDecl(ClassDecl *klass) {
     _fs->AddInstruction(_OP_NEWOBJ, _fs->PushTarget(), baseIdx, 0, NOT_CLASS);
 
     generateTableDecl(klass);
-
 
     if (klass->context() == DC_SLOT) {
         EmitDerefOp(_OP_NEWSLOT);
@@ -3699,11 +2747,39 @@ void CodegenVisitor::visitParamDecl(ParamDecl *param) {
     }
 }
 
-SQInteger _last_pop = -1;
+const SQChar *varDescriptor(VarDecl *var) {
+    Expr *init = var->initializer();
+    if (init == NULL) {
+        return var->isAssignable() ? _SC("Local variable") : _SC("Named binding");
+    }
+    else {
+        if (init->op() == TO_DECL_EXPR) {
+            Decl *decl = static_cast<DeclExpr *>(init)->declaration();
+            switch (decl->op())
+            {
+            case TO_FUNCTION: return _SC("Function");
+            case TO_CLASS: return _SC("Class");
+            case TO_TABLE: 
+                return _SC("Named binding"); // <== is that correct?
+            default:
+                assert(0 && "Unexpected declaration kind");
+                break;
+            }
+        }
+        else {
+            return var->isAssignable() ? _SC("Local variable") : _SC("Named binding");
+        }
+    }
+
+}
 
 void CodegenVisitor::visitVarDecl(VarDecl *var) {
     addLineNumber(var);
     Id *name = var->name();
+
+    SQObject varName = _fs->CreateString(name->id());
+
+    CheckDuplicateLocalIdentifier(varName, varDescriptor(var), false);
 
     if (var->initializer()) {
         var->initializer()->visit(*this);
@@ -3716,7 +2792,7 @@ void CodegenVisitor::visitVarDecl(VarDecl *var) {
     }
 
     _last_pop = _fs->PopTarget();
-    _fs->PushLocalVariable(_fs->CreateString(name->id()), var->isAssignable());
+    _fs->PushLocalVariable(varName, var->isAssignable());
 }
 
 void CodegenVisitor::visitDeclGroup(DeclGroup *group) {
@@ -3731,7 +2807,7 @@ void CodegenVisitor::visitDeclGroup(DeclGroup *group) {
 
 void CodegenVisitor::visitDesctructionDecl(DesctructionDecl *destruct) {
     addLineNumber(destruct);
-    sqvector<SQInteger> targets(_ss(&_vm)->_alloc_ctx);
+    sqvector<SQInteger> targets(_arena);
 
     const auto declarations = destruct->declarations();
 
@@ -3767,7 +2843,7 @@ void CodegenVisitor::visitDesctructionDecl(DesctructionDecl *destruct) {
 void CodegenVisitor::visitFunctionDecl(FunctionDecl *func) {
     addLineNumber(func);
     SQFuncState *oldFuncState = _funcState;
-    SQFuncState *funcstate = _fs->PushChildState(_ss(&_vm));
+    SQFuncState *funcstate = _fs->PushChildState(_ss(_vm));
     funcstate->_name = func->name()->id();
     funcstate->_sourcename = func->sourceName();
     funcstate->_varparams = func->isVararg();
@@ -3818,7 +2894,7 @@ SQTable* CodegenVisitor::GetScopedConstsTable()
     assert(!_scopedconsts.empty());
     SQObjectPtr &consts = _scopedconsts.top();
     if (sq_type(consts) != OT_TABLE)
-        consts = SQTable::Create(_ss(&_vm), 0);
+        consts = SQTable::Create(_ss(_vm), 0);
     return _table(consts);
 }
 
@@ -3834,10 +2910,13 @@ SQObject CodegenVisitor::selectLiteral(LiteralExpr *lit) {
 
 void CodegenVisitor::visitConstDecl(ConstDecl *decl) {
     addLineNumber(decl);
+
     SQObject id = _fs->CreateString(decl->name()->id());
     SQObject value = selectLiteral(decl->value());
 
-    SQTable *enums = decl->isGlobal() ? _table(_ss(&_vm)->_consts) : GetScopedConstsTable();
+    CheckDuplicateLocalIdentifier(id, _SC("Constant"), decl->isGlobal() && !(_fs->lang_features & LF_FORBID_GLOBAL_CONST_REWRITE));
+
+    SQTable *enums = decl->isGlobal() ? _table(_ss(_vm)->_consts) : GetScopedConstsTable();
     SQObjectPtr strongid = id;
     enums->NewSlot(strongid, SQObjectPtr(value));
     strongid.Null();
@@ -3849,6 +2928,10 @@ void CodegenVisitor::visitEnumDecl(EnumDecl *enums) {
     table._flags = SQOBJ_FLAG_IMMUTABLE;
     SQInteger nval = 0;
 
+    SQObject id = _fs->CreateString(enums->name()->id());
+
+    CheckDuplicateLocalIdentifier(id, _SC("Enum"), enums->isGlobal() && !(_fs->lang_features & LF_FORBID_GLOBAL_CONST_REWRITE));
+
     const auto consts = enums->consts();
 
     for (int i = 0; i < consts.size(); ++i) {
@@ -3856,10 +2939,9 @@ void CodegenVisitor::visitEnumDecl(EnumDecl *enums) {
         _table(table)->NewSlot(SQObjectPtr(c.id), SQObjectPtr(c.val));
     }
 
-    SQTable *enumsTable = enums->isGlobal() ? _table(_ss(&_vm)->_consts) : GetScopedConstsTable();
-
-    SQObjectPtr strongid = enums->name();
-    enumsTable->NewSlot(SQObjectPtr(strongid), SQObjectPtr(table));
+    SQTable *enumsTable = enums->isGlobal() ? _table(_ss(_vm)->_consts) : GetScopedConstsTable();
+    SQObjectPtr strongid = id;
+    enumsTable->NewSlot(strongid, SQObjectPtr(table));
     strongid.Null();
 }
 
@@ -3883,7 +2965,7 @@ bool isOuter(Expr *expr) {
 }
 
 void CodegenVisitor::maybeAddInExprLine(Expr *expr) {
-    if (!_ss(&_vm)->_lineInfoInExpressions) return;
+    if (!_ss(_vm)->_lineInfoInExpressions) return;
 
     if (expr->linePos() != -1) {
         _fs->AddLineInfos(expr->linePos(), _lineinfo, false);
@@ -3904,10 +2986,7 @@ void CodegenVisitor::visitCallExpr(CallExpr *call) {
     Expr *callee = call->callee();
     bool isNullCall = call->isNullable();
 
-    bool old_dng = _donot_get;
-    _donot_get = true;
-    callee->visit(*this);
-    _donot_get = old_dng;
+    visitNoGet(callee);
 
     if (isObject(callee)) {
         if (!isNullCall) {
@@ -4013,10 +3092,8 @@ void CodegenVisitor::emitUnaryOp(SQOpcode op, Expr *arg) {
 }
 
 void CodegenVisitor::emitDelete(Expr *argument) {
-    bool old_dng = _donot_get;
-    _donot_get = true;
-    argument->visit(*this);
-    _donot_get = old_dng;
+
+    visitNoGet(argument);
 
     switch (argument->op())
     {
@@ -4053,9 +3130,6 @@ void CodegenVisitor::visitUnExpr(UnExpr *unary) {
     case TO_RESUME: emitUnaryOp(_OP_RESUME, unary->argument()); break;
     case TO_CLONE: emitUnaryOp(_OP_CLONE, unary->argument()); break;
     case TO_PAREN: unary->argument()->visit(*this); break;
-    case TO_PDEC:
-    case TO_PINC: // TODO
-        break;
     case TO_DELETE: emitDelete(unary->argument());
         break;
     default:
@@ -4091,10 +3165,7 @@ void CodegenVisitor::emitJpmArith(SQOpcode op, Expr *lhs, Expr *rhs) {
 
 void CodegenVisitor::emitCompoundArith(SQOpcode op, SQInteger opcode, Expr *lvalue, Expr *rvalue) {
 
-    bool old_dng = _donot_get;
-    _donot_get = true;
-    lvalue->visit(*this);
-    _donot_get = old_dng;
+    visitNoGet(lvalue);
 
     rvalue->visit(*this);
 
@@ -4125,7 +3196,7 @@ void CodegenVisitor::emitCompoundArith(SQOpcode op, SQInteger opcode, Expr *lval
             _fs->AddInstruction(_OP_COMPARITH, _fs->PushTarget(), (src << 16) | val, key, opcode);
         }
         else {
-            // TODO: err
+            error(_SC("can't assign to expression"));
         }
     }
     else if (lvalue->isAccessExpr()) {
@@ -4136,7 +3207,7 @@ void CodegenVisitor::emitCompoundArith(SQOpcode op, SQInteger opcode, Expr *lval
         _fs->AddInstruction(_OP_COMPARITH, _fs->PushTarget(), (src << 16) | val, key, opcode);
     }
     else {
-        // TODO: err
+        error(_SC("can't assign to expression"));
     }
 }
 
@@ -4177,10 +3248,9 @@ void CodegenVisitor::checkIfAssiagnable(BinExpr *expr) {
 }
 
 void CodegenVisitor::emitNewSlot(Expr *lvalue, Expr *rvalue) {
-    bool old_dng = _donot_get;
-    _donot_get = true;
-    lvalue->visit(*this);
-    _donot_get = old_dng;
+
+    visitNoGet(lvalue);
+
     rvalue->visit(*this);
 
     if (lvalue->isAccessExpr()) { // d.f || d["f"]
@@ -4206,16 +3276,10 @@ void CodegenVisitor::emitFieldAssign(bool isLiteral) {
 }
 
 void CodegenVisitor::emitAssign(Expr *lvalue, Expr * rvalue, bool inExpr) {
-    bool old_dng = _donot_get;
-    _donot_get = true;
-    lvalue->visit(*this);
-    _donot_get = old_dng;
+
+    visitNoGet(lvalue);
 
     rvalue->visit(*this);
-
-    if (inExpr) { // add extra checks
-
-    }
 
     if (lvalue->op() == TO_ID) {
         Id *id = lvalue->asId();
@@ -4392,10 +3456,8 @@ void CodegenVisitor::visitTerExpr(TerExpr *expr) {
 void CodegenVisitor::visitIncExpr(IncExpr *expr) {
     maybeAddInExprLine(expr);
     Expr *arg = expr->argument();
-    bool old_dng = _donot_get;
-    _donot_get = true;
-    arg->visit(*this);
-    _donot_get = old_dng;
+
+    visitNoGet(arg);
 
     if (!isLValue(arg)) {
         error(_SC("argument of inc/dec operation is not assiangable"));
@@ -4427,11 +3489,11 @@ void CodegenVisitor::visitIncExpr(IncExpr *expr) {
             Emit2ArgsOP(isPostfix ? _OP_PINC : _OP_INC, expr->diff());
         }
         else {
-            // TODO: error
+            error(_SC("argument of inc/dec operation is not assiangable"));
         }
     }
     else {
-        // TODO: error
+        error(_SC("argument of inc/dec operation is not assiangable"));
     }
 }
 
@@ -4462,11 +3524,18 @@ bool CodegenVisitor::IsLocalConstant(const SQObject &name, SQObject &e)
 bool CodegenVisitor::IsGlobalConstant(const SQObject &name, SQObject &e)
 {
     SQObjectPtr val;
-    if (_table(_ss(&_vm)->_consts)->Get(name, val)) {
+    if (_table(_ss(_vm)->_consts)->Get(name, val)) {
         e = val;
         return true;
     }
     return false;
+}
+
+void CodegenVisitor::visitCommaExpr(CommaExpr *expr) {
+    auto expressions = expr->expressions();
+    for (int i = 0; i < expressions.size(); ++i) {
+        expressions[i]->visit(*this);
+    }
 }
 
 void CodegenVisitor::visitId(Id *id) {
@@ -4475,6 +3544,17 @@ void CodegenVisitor::visitId(Id *id) {
     SQObject constant;
     SQObject idObj = _fs->CreateString(id->id());
     bool assignable = false;
+
+    if (sq_isstring(_fs->_name)
+        && scstrcmp(_stringval(_fs->_name), id->id()) == 0
+        && _fs->GetLocalVariable(_fs->_name, assignable) == -1) {
+        _fs->AddInstruction(_OP_LOADCALLEE, _fs->PushTarget());
+        return;
+    }
+
+    if (_stringval(idObj) == _stringval(_fs->_name)) {
+        error(_SC("Variable name %s conflicts with function name"), idObj);
+    }
 
     if ((pos = _fs->GetLocalVariable(idObj, assignable)) != -1) {
         _fs->PushTarget(pos);
@@ -4527,10 +3607,12 @@ void CodegenVisitor::visitId(Id *id) {
         * be generated), and push the key next. Generate an _OP_LOAD instruction
         * for the latter. If we are not using the variable as a dref expr, generate
         * the _OP_GET instruction.
+
         */
+        // TODO: probably we need a special handling for some corner cases
         if ((_fs->lang_features & LF_EXPLICIT_THIS)
             && !(_fs->lang_features & LF_TOOLS_COMPILE_CHECK))
-            _compiler.Error(_SC("Unknown variable [%s]"), _stringval(idObj));
+            error(_SC("Unknown variable [%s]"), _stringval(idObj));
 
         _fs->PushTarget(0);
         _fs->AddInstruction(_OP_LOAD, _fs->PushTarget(), _fs->GetConstant(idObj));
@@ -4538,12 +3620,16 @@ void CodegenVisitor::visitId(Id *id) {
             Emit2ArgsOP(_OP_GET);
         }
         id->setField();
-        //_es.etype = OBJECT;
     }
 }
 
 
-
+void CodegenVisitor::visitNoGet(Node *n) {
+    bool old_dng = _donot_get;
+    _donot_get = true;
+    n->visit(*this);
+    _donot_get = old_dng;
+}
 
 
 #endif

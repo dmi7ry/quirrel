@@ -4,6 +4,30 @@
 
 #include <memory>
 
+#if defined(_WIN32)  || defined(_WIN64) 
+#include <windows.h>
+//#include <memoryapi.h>
+#else // __unix__ 
+#include <sys/mman.h>
+#ifndef MAP_ANONYMOUS
+#  define MAP_ANONYMOUS	0x20
+#endif
+#endif // defined(_WIN32)  || defined(_WIN64) 
+
+#ifdef Yield
+#undef Yield
+#endif
+
+#ifdef max
+#undef max
+#endif
+
+struct SQAllocContextT {
+    virtual void *memAlloc(size_t size) { return malloc(size); }
+    virtual void *memRealloc(void *ptr, size_t o, size_t s) { return realloc(ptr, s); }
+    virtual void  memFree(void *ptr) { free(ptr); }
+};
+
 typedef struct SQAllocContextT * SQAllocContext;
 
 void sq_vm_init_alloc_context(SQAllocContext * ctx);
@@ -164,5 +188,181 @@ private:
     SQUnsignedInteger _allocated;
 };
 
+#define PAGE_SIZE 4096
+#define ALIGN_SIZE(len, align) (((len)+(align - 1)) & ~((align)-1))
+#define ALIGN_PTR(ptr, align) (((~((uintptr_t)(ptr))) + 1) & ((align) - 1))
+#define ALIGN_SIZE_TO_PAGE(len) ALIGN_SIZE(len, PAGE_SIZE)
+#define ALIGN_SIZE_TO_WORD(len) ALIGN_SIZE(len, 0x8)
+
+class Arena : public SQAllocContextT {
+public:
+
+    Arena(const SQChar *name, size_t chunkSize = 4 * PAGE_SIZE) : _name(name), _chunks(NULL), _bigChunks(NULL) {
+        _chunkSize = ALIGN_SIZE_TO_PAGE(chunkSize);
+    }
+
+    ~Arena() {
+        release();
+    }
+
+    uint8_t *allocate(size_t size) {
+        size = ALIGN_SIZE_TO_WORD(size);
+
+        if (size > maxChunkSize) {
+            return allocateBigChunk(size);
+        }
+        else {
+            return allocatePull(size);
+        }
+    }
+
+    void release() {
+        struct BigChunk *bch = _bigChunks;
+        while (bch) {
+            struct BigChunk *cur = bch;
+            bch = cur->_next;
+            delete cur;
+        }
+        _bigChunks = NULL;
+
+        struct Chunk *ch = _chunks;
+        while (bch) {
+            struct Chunk *cur = ch;
+            ch = cur->next;
+            delete cur;
+        }
+        _bigChunks = NULL;
+    }
+
+    void *memAlloc(size_t s) override { return allocate(s); }
+    void *memRealloc(void *ptr, size_t o, size_t s) override {
+        void *newPtr = allocate(s);
+        memcpy(newPtr, ptr, o);
+        return newPtr;
+    }
+    void memFree(void *ptr) override {  }
+
+private:
+    struct Chunk {
+        struct Chunk *next;
+        uint8_t *start;
+        uint8_t *ptr;
+        size_t size;
+
+        size_t allocated() const { return ptr - start; }
+        size_t left() const { return size - allocated(); }
+
+        Chunk(struct Chunk *n, size_t s) : next(n), size(s) {
+            start = ptr = allocatePage(size);
+        }
+
+        ~Chunk() {
+            releasePage();
+        }
+
+        uint8_t *allocatePage(size_t size) {
+#if defined(_WIN32)  || defined(_WIN64) 
+            void *result = VirtualAlloc(NULL, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+#else // __unix__ 
+            void *result = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (result == MAP_FAILED) {
+                fprintf(stderr, "Cannot allocate %zu bytes via mmap, %s\n", size, strerror(errno));
+                exit(ERR_MMAP);
+            }
+#endif // defined(_WIN32)  || defined(_WIN64) 
+            memset(result, 0, size);
+            return (uint8_t *)result;
+        }
+
+        void releasePage() {
+#if defined(_WIN32)  || defined(_WIN64) 
+            VirtualFree(start, 0, MEM_RELEASE);
+#else // __unix__ 
+            munmap(start, size);
+#endif // defined(_WIN32)  || defined(_WIN64) 
+        }
+
+
+        uint8_t *allocate(size_t size) {
+            assert(size <= left());
+            uint8_t *res = ptr;
+            ptr += size;
+            return res;
+        }
+
+    };
+
+    uint8_t *allocateBigChunk(size_t size) {
+        struct BigChunk *ch = new BigChunk(_bigChunks, size);
+        _bigChunks = ch;
+        return ch->_ptr;
+    }
+
+
+    struct Chunk *findChunk(size_t size) {
+        struct Chunk *ch = _chunks;
+        while (ch) {
+            if (size <= ch->left()) return ch;
+            ch = ch->next;
+        }
+
+        ch = new Chunk(_chunks, _chunkSize);
+        _chunks = ch;
+        return ch;
+    }
+
+    uint8_t *allocatePull(size_t size) {
+        struct Chunk *chunk = findChunk(size);
+        assert(size <= chunk->left());
+        return chunk->allocate(size);
+    }
+
+    const static size_t maxChunkSize = 0x1000;
+
+    struct Chunk *_chunks;
+
+    struct BigChunk {
+
+        BigChunk(struct BigChunk *next, size_t size) : _next(next) {
+            _ptr = (uint8_t *)malloc(size);
+            memset(_ptr, 0, size);
+        }
+
+        ~BigChunk() {
+            free(_ptr);
+        }
+
+        struct BigChunk *_next;
+        uint8_t *_ptr;
+    };
+
+    struct BigChunk *_bigChunks;
+
+    const SQChar *_name;
+
+    size_t _chunkSize;
+
+};
+
+
+class ArenaObj {
+protected:
+    ArenaObj() {}
+    virtual ~ArenaObj() {}
+
+private:
+    void *operator new(size_t size) { assert(0); return NULL; }
+
+public:
+    void *operator new(size_t size, Arena *arena) {
+        return arena->allocate(size);
+    }
+
+    void operator delete(void *p, Arena *arena) {
+    }
+
+    void operator delete(void *p) {
+    }
+};
 
 #endif //_SQUTILS_H_
