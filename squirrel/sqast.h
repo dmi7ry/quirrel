@@ -49,19 +49,26 @@
     DEF_TREE_OP(MOD), \
     DEF_TREE_OP(ADD), \
     DEF_TREE_OP(SUB), \
+    DEF_TREE_OP(NEWSLOT), \
+    DEF_TREE_OP(INEXPR_ASSIGN), \
+    DEF_TREE_OP(PLUSEQ), \
+    DEF_TREE_OP(MINUSEQ), \
+    DEF_TREE_OP(MULEQ), \
+    DEF_TREE_OP(DIVEQ), \
+    DEF_TREE_OP(MODEQ), \
     DEF_TREE_OP(NOT), \
     DEF_TREE_OP(BNOT), \
     DEF_TREE_OP(NEG), \
     DEF_TREE_OP(TYPEOF), \
     DEF_TREE_OP(RESUME), \
     DEF_TREE_OP(CLONE), \
+    DEF_TREE_OP(PAREN), \
     DEF_TREE_OP(DELETE), \
     DEF_TREE_OP(LITERAL), \
     DEF_TREE_OP(BASE), \
     DEF_TREE_OP(ROOT), \
     DEF_TREE_OP(THIS), \
     DEF_TREE_OP(CALLEE), \
-    DEF_TREE_OP(PAREN), \
     DEF_TREE_OP(INC), \
     DEF_TREE_OP(DECL_EXPR), \
     DEF_TREE_OP(ARRAYEXPR), \
@@ -71,13 +78,6 @@
     DEF_TREE_OP(SETTABLE), \
     DEF_TREE_OP(CALL), \
     DEF_TREE_OP(TERNARY), \
-    DEF_TREE_OP(INEXPR_ASSIGN), \
-    DEF_TREE_OP(NEWSLOT), \
-    DEF_TREE_OP(PLUSEQ), \
-    DEF_TREE_OP(MINUSEQ), \
-    DEF_TREE_OP(MULEQ), \
-    DEF_TREE_OP(DIVEQ), \
-    DEF_TREE_OP(MODEQ), \
     DEF_TREE_OP(EXPR_MARK), \
     DEF_TREE_OP(VAR), \
     DEF_TREE_OP(PARAM), \
@@ -88,8 +88,7 @@
     DEF_TREE_OP(CONSTRUCTOR), \
     DEF_TREE_OP(CLASS), \
     DEF_TREE_OP(ENUM), \
-    DEF_TREE_OP(TABLE), \
-    DEF_TREE_OP(ARRAY)
+    DEF_TREE_OP(TABLE)
 
 enum TreeOp {
 #define DEF_TREE_OP(arg) TO_##arg
@@ -112,8 +111,120 @@ public:
 
     enum TreeOp op() const { return _op; }
 
-    virtual void visit(Visitor &visitor) { visitChildren(visitor); }
-    virtual void visitChildren(Visitor &visitor) = 0;
+    template<typename V>
+    void visit(V *visitor) {
+        switch (op())
+        {
+        case TO_BLOCK:      visitor->visitBlock(static_cast<Block *>(this)); return;
+        case TO_IF:         visitor->visitIfStatement(static_cast<IfStatement *>(this)); return;
+        case TO_WHILE:      visitor->visitWhileStatement(static_cast<WhileStatement *>(this)); return;
+        case TO_DOWHILE:    visitor->visitDoWhileStatement(static_cast<DoWhileStatement *>(this)); return;
+        case TO_FOR:        visitor->visitForStatement(static_cast<ForStatement *>(this)); return;
+        case TO_FOREACH:    visitor->visitForeachStatement(static_cast<ForeachStatement *>(this)); return;
+        case TO_SWITCH:     visitor->visitSwitchStatement(static_cast<SwitchStatement *>(this)); return;
+        case TO_RETURN:     visitor->visitReturnStatement(static_cast<ReturnStatement *>(this)); return;
+        case TO_YIELD:      visitor->visitYieldStatement(static_cast<YieldStatement *>(this)); return;
+        case TO_THROW:      visitor->visitThrowStatement(static_cast<ThrowStatement *>(this)); return;
+        case TO_TRY:        visitor->visitTryStatement(static_cast<TryStatement *>(this)); return;
+        case TO_BREAK:      visitor->visitBreakStatement(static_cast<BreakStatement *>(this)); return;
+        case TO_CONTINUE:   visitor->visitContinueStatement(static_cast<ContinueStatement *>(this)); return;
+        case TO_EXPR_STMT:  visitor->visitExprStatement(static_cast<ExprStatement *>(this)); return;
+        case TO_EMPTY:      visitor->visitEmptyStatement(static_cast<EmptyStatement *>(this)); return;
+            //case TO_STATEMENT_MARK:
+        case TO_ID:         visitor->visitId(static_cast<Id *>(this)); return;
+        case TO_COMMA:      visitor->visitCommaExpr(static_cast<CommaExpr *>(this)); return;
+        case TO_NULLC:
+        case TO_ASSIGN:
+        case TO_OROR:
+        case TO_ANDAND:
+        case TO_OR:
+        case TO_XOR:
+        case TO_AND:
+        case TO_NE:
+        case TO_EQ:
+        case TO_3CMP:
+        case TO_GE:
+        case TO_GT:
+        case TO_LE:
+        case TO_LT:
+        case TO_IN:
+        case TO_INSTANCEOF:
+        case TO_USHR:
+        case TO_SHR:
+        case TO_SHL:
+        case TO_MUL:
+        case TO_DIV:
+        case TO_MOD:
+        case TO_ADD:
+        case TO_SUB:
+        case TO_NEWSLOT:
+        case TO_INEXPR_ASSIGN:
+        case TO_PLUSEQ:
+        case TO_MINUSEQ:
+        case TO_MULEQ:
+        case TO_DIVEQ:
+        case TO_MODEQ:
+            visitor->visitBinExpr(static_cast<BinExpr *>(this)); return;
+        case TO_NOT:
+        case TO_BNOT:
+        case TO_NEG:
+        case TO_TYPEOF:
+        case TO_RESUME:
+        case TO_CLONE:
+        case TO_PAREN:
+        case TO_DELETE:
+            visitor->visitUnExpr(static_cast<UnExpr *>(this)); return;
+        case TO_LITERAL:
+            visitor->visitLiteralExpr(static_cast<LiteralExpr *>(this)); return;
+        case TO_BASE:
+            visitor->visitBaseExpr(static_cast<BaseExpr *>(this)); return;
+        case TO_ROOT:
+            visitor->visitRootExpr(static_cast<RootExpr *>(this)); return;
+        case TO_INC:
+            visitor->visitIncExpr(static_cast<IncExpr *>(this)); return;
+        case TO_DECL_EXPR:
+            visitor->visitDeclExpr(static_cast<DeclExpr *>(this)); return;
+        case TO_ARRAYEXPR:
+            visitor->visitArrayExpr(static_cast<ArrayExpr *>(this)); return;
+        case TO_GETFIELD:
+            visitor->visitGetFieldExpr(static_cast<GetFieldExpr *>(this)); return;
+        case TO_SETFIELD:
+            visitor->visitSetFieldExpr(static_cast<SetFieldExpr *>(this)); return;
+        case TO_GETTABLE:
+            visitor->visitGetTableExpr(static_cast<GetTableExpr *>(this)); return;
+        case TO_SETTABLE:
+            visitor->visitSetTableExpr(static_cast<SetTableExpr *>(this)); return;
+        case TO_CALL:
+            visitor->visitCallExpr(static_cast<CallExpr *>(this)); return;
+        case TO_TERNARY:
+            visitor->visitTerExpr(static_cast<TerExpr *>(this)); return;
+            //case TO_EXPR_MARK:
+        case TO_VAR:
+            visitor->visitVarDecl(static_cast<VarDecl *>(this)); return;
+        case TO_PARAM:
+            visitor->visitParamDecl(static_cast<ParamDecl *>(this)); return;
+        case TO_CONST:
+            visitor->visitConstDecl(static_cast<ConstDecl *>(this)); return;
+        case TO_DECL_GROUP:
+            visitor->visitDeclGroup(static_cast<DeclGroup *>(this)); return;
+        case TO_DESTRUCT:
+            visitor->visitDesctructionDecl(static_cast<DesctructionDecl *>(this)); return;
+        case TO_FUNCTION:
+            visitor->visitFunctionDecl(static_cast<FunctionDecl *>(this)); return;
+        case TO_CONSTRUCTOR:
+            visitor->visitConstructorDecl(static_cast<ConstructorDecl *>(this)); return;
+        case TO_CLASS:
+            visitor->visitClassDecl(static_cast<ClassDecl *>(this)); return;
+        case TO_ENUM:
+            visitor->visitEnumDecl(static_cast<EnumDecl *>(this)); return;
+        case TO_TABLE:
+            visitor->visitTableDecl(static_cast<TableDecl *>(this)); return;
+        default:
+            break;
+        }
+    }
+
+    void visitChildren(Visitor *visitor);
 
     bool isDeclaration() const { return _op > TO_EXPR_MARK; }
     bool isStatement() const { return _op < TO_STATEMENT_MARK; }
@@ -142,7 +253,6 @@ protected:
 public:
     bool isAccessExpr() const { return TO_GETFIELD <= op() && op() <= TO_SETTABLE; }
     AccessExpr *asAccessExpr() const { assert(isAccessExpr()); return (AccessExpr*)this; }
-    void visit(Visitor &visitor) override;
 };
 
 enum IdType : SQInteger {
@@ -155,8 +265,7 @@ class Id : public Expr {
 public:
     Id(const SQChar *id) : Expr(TO_ID), _id(id), _outpos(ID_LOCAL), _assignable(false) {}
 
-    void visit(Visitor &visitor);
-    void visitChildren(Visitor &visitor);
+    void visitChildren(Visitor *visitor) {}
 
     const SQChar *id() { return _id; }
 
@@ -175,7 +284,7 @@ public:
     bool isBinding() const { return (isOuter() || isLocal()) && isAssignable(); }
 
 
-//private:
+private:
     const SQChar *_id;
     SQInteger _outpos;
     bool _assignable;
@@ -185,12 +294,11 @@ class UnExpr : public Expr {
 public:
     UnExpr(enum TreeOp op, Expr *arg): Expr(op), _arg(arg) {}
 
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    void visitChildren(Visitor *visitor);
 
     Expr *argument() const { return _arg; }
 
-//private:
+private:
     Expr *_arg;
 };
 
@@ -198,8 +306,7 @@ class BinExpr : public Expr {
 public:
     BinExpr(enum TreeOp op, Expr *lhs, Expr *rhs) : Expr(op), _lhs(lhs), _rhs(rhs) {}
 
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    void visitChildren(Visitor *visitor);
 
     Expr *lhs() const { return _lhs; }
     Expr *rhs() const { return _rhs; }
@@ -212,8 +319,7 @@ class TerExpr : public Expr {
 public:
     TerExpr(Expr *a, Expr *b, Expr *c) : Expr(TO_TERNARY), _a(a), _b(b), _c(c) {}
 
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    void visitChildren(Visitor *visitor);
 
     Expr *a() const { return _a; }
     Expr *b() const { return _b; }
@@ -232,9 +338,6 @@ class AccessExpr : public Expr {
 protected:
     AccessExpr(enum TreeOp op, Expr *receiver, bool nullable) : Expr(op), _receiver(receiver), _nullable(nullable) {}
 public:
-
-    void visit(Visitor &visitor) = 0;
-    void visitChildren(Visitor &visitor) = 0;
 
     bool isFieldAccessExpr() const { return op() == TO_GETFIELD || op() == TO_SETFIELD; }
     FieldAccessExpr *asFieldAccessExpr() const { assert(isFieldAccessExpr()); return (FieldAccessExpr *)this; }
@@ -266,8 +369,7 @@ class GetFieldExpr : public FieldAccessExpr {
 public:
     GetFieldExpr(Expr *receiver, const SQChar *field, bool nullable): FieldAccessExpr(TO_GETFIELD, receiver, field, nullable) { }
 
-    void visit(Visitor &visitor);
-    void visitChildren(Visitor &visitor);
+    void visitChildren(Visitor *visitor);
 };
 
 
@@ -275,8 +377,7 @@ class SetFieldExpr : public FieldAccessExpr {
 public:
     SetFieldExpr(Expr *receiver, const SQChar *field, Expr *value, bool nullable): FieldAccessExpr(TO_SETFIELD, receiver, field, nullable), _value(value) { }
 
-    void visit(Visitor &visitor);
-    void visitChildren(Visitor &visitor);
+    void visitChildren(Visitor *visitor);
 
     Expr *value() const { return _value; }
 
@@ -299,16 +400,14 @@ class GetTableExpr : public TableAccessExpr {
 public:
     GetTableExpr(Expr *receiver, Expr *key, bool nullable): TableAccessExpr(TO_GETTABLE, receiver, key, nullable) { }
 
-    void visit(Visitor &visitor);
-    void visitChildren(Visitor &visitor);
+    void visitChildren(Visitor *visitor);
 };
 
 class SetTableExpr : public TableAccessExpr {
 public:
     SetTableExpr(Expr *receiver, Expr *key, Expr *val, bool nullable): TableAccessExpr(TO_SETTABLE, receiver, key, nullable), _val(val) { }
 
-    void visit(Visitor &visitor);
-    void visitChildren(Visitor &visitor);
+    void visitChildren(Visitor *visitor);
 
     Expr *value() const { return _val; }
 private:
@@ -318,8 +417,8 @@ private:
 class BaseExpr : public Expr {
 public:
     BaseExpr() : Expr(TO_BASE) {}
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    
+    void visitChildren(Visitor *visitor) {}
 
     void setPos(SQInteger pos) { _pos = pos; }
     SQInteger getPos() const { return _pos; }
@@ -332,24 +431,7 @@ class RootExpr : public Expr {
 public:
     RootExpr() : Expr(TO_ROOT) {}
 
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
-};
-
-class ThisExpr : public Expr {
-public:
-    ThisExpr() : Expr(TO_THIS) {}
-
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
-};
-
-class CalleeExpr : public Expr {
-public:
-    CalleeExpr() : Expr(TO_CALLEE) {}
-
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    void visitChildren(Visitor *visitor) {}
 };
 
 enum LiteralKind {
@@ -369,8 +451,7 @@ public:
     LiteralExpr(SQInteger i) : Expr(TO_LITERAL), _kind(LK_INT) { _v.i = i; }
     LiteralExpr(bool i) : Expr(TO_LITERAL), _kind(LK_BOOL) { _v.i = i; }
 
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    void visitChildren(Visitor *visitor) {}
 
     enum LiteralKind kind() const { return _kind;  }
 
@@ -402,8 +483,7 @@ class IncExpr : public Expr {
 public:
     IncExpr(Expr *arg, SQInteger diff, enum IncForm form) : Expr(TO_INC), _arg(arg), _diff(diff), _form(form) {}
 
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    void visitChildren(Visitor *visitor);
 
     enum IncForm form() const { return _form; }
     SQInteger diff() const { return _diff; }
@@ -421,8 +501,7 @@ class DeclExpr : public Expr {
 public:
     DeclExpr(Decl *decl) : Expr(TO_DECL_EXPR), _decl(decl) {}
 
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    void visitChildren(Visitor *visitor);
 
     Decl *declaration() const { return _decl; }
 
@@ -436,8 +515,7 @@ public:
 
     void addArgument(Expr *arg) { _args.push_back(arg); }
 
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    void visitChildren(Visitor *visitor);
 
     bool isNullable() const { return _nullable; }
     Expr *callee() const { return _callee; }
@@ -456,8 +534,7 @@ public:
 
     void addValue(Expr *v) { _inits.push_back(v); }
 
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    void visitChildren(Visitor *visitor);
 
     const sqvector<Expr *> &initialziers() const { return _inits; }
 
@@ -471,8 +548,7 @@ public:
 
     void addExpression(Expr *expr) { _exprs.push_back(expr); }
 
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    void visitChildren(Visitor *visitor);
 
     const sqvector<Expr *> &expressions() const { return _exprs; }
 
@@ -483,8 +559,6 @@ private:
 class Statement : public Node {
 protected:
     Statement(enum TreeOp op) : Node(op) {}
-public:
-    void visit(Visitor &visitor) override;
 };
 
 enum DeclarationContext {
@@ -497,7 +571,6 @@ class Decl : public Statement {
 protected:
     Decl(enum TreeOp op) : Statement(op) {}
 public:
-    void visit(Visitor &visitor) override;
 
     void setContext(enum DeclarationContext ctx) { _context = ctx; }
     enum DeclarationContext context() const { return _context; }
@@ -509,16 +582,13 @@ private:
 class ValueDecl : public Decl {
 protected:
     ValueDecl(enum TreeOp op, Id *name, Expr *expr) : Decl(op), _name(name), _expr(expr) {}
-
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
-//private:
+public:
+    void visitChildren(Visitor *visitor);
 
     Expr *expression() const { return _expr; }
-
-public:
-
     Id *name() const { return _name; }
+
+private:
 
     Id *_name;
     Expr *_expr;
@@ -527,8 +597,6 @@ public:
 class ParamDecl : public ValueDecl {
 public:
     ParamDecl(Id *name, Expr *defaltVal) : ValueDecl(TO_PARAM, name, defaltVal) {}
-
-    void visit(Visitor &visitor) override;
 
     bool hasDefaultValue() const { return expression() != NULL; }
     Expr *defaultValue() const { return expression(); }
@@ -542,7 +610,6 @@ public:
 
     bool isAssignable() const { return _assignable; }
 
-    void visit(Visitor &visitor) override;
 private:
     bool _assignable;
 };
@@ -559,8 +626,7 @@ public:
 
     void addMember(Expr *key, Node *value, bool isStatic = false) { _members.push_back({ key, value, isStatic }); }
 
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    void visitChildren(Visitor *visitor);
 
     sqvector<TableMember> &members() { return _members; }
     const sqvector<TableMember> &members() const { return _members; }
@@ -575,8 +641,7 @@ class ClassDecl : public TableDecl {
 public:
     ClassDecl(Arena *arena, Expr *key, Expr *base) : TableDecl(arena, TO_CLASS), _key(key), _base(base) {}
 
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    void visitChildren(Visitor *visitor);
 
     Expr *classBase() const { return _base; }
     Expr* classKey() const { return _key; }
@@ -601,8 +666,7 @@ public:
     void setVararg() { _vararg = true; }
     void setBody(Statement *body) { _body = body; }
 
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    void visitChildren(Visitor *visitor);
 
     Id *name() const { return _name; }
     bool isVararg() const { return _vararg; }
@@ -612,7 +676,7 @@ public:
     const SQChar *sourceName() const { return _sourcename; }
 
 
-//private:
+private:
     Arena *_arena;
     Id *_name;
     sqvector<ParamDecl *> _parameters;
@@ -627,7 +691,6 @@ class ConstructorDecl : public FunctionDecl {
 public:
     ConstructorDecl(Arena *arena, Id *name) : FunctionDecl(TO_CONSTRUCTOR, arena, name) {}
 
-    void visit(Visitor &visitor) override;
 };
 
 struct EnumConst {
@@ -644,13 +707,12 @@ public:
     sqvector<EnumConst> &consts() { return _consts; }
     const sqvector<EnumConst> &consts() const { return _consts; }
 
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    void visitChildren(Visitor *visitor);
 
     Id *name() const { return _id; }
     bool isGlobal() const { return _global; }
 
-//private:
+private:
     sqvector<EnumConst> _consts;
     Id *_id;
     bool _global;
@@ -660,14 +722,13 @@ class ConstDecl : public Decl {
 public:
     ConstDecl(Id *id, LiteralExpr *value, bool global) : Decl(TO_CONST), _id(id), _value(value), _global(global) {}
 
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    void visitChildren(Visitor *visitor);
 
     Id *name() const { return _id; }
     LiteralExpr *value() const { return _value; }
     bool isGlobal() const { return _global; }
 
-//private:
+private:
     Id *_id;
     LiteralExpr *_value;
     bool _global;
@@ -681,8 +742,7 @@ public:
 
     void addDeclaration(VarDecl *d) { _decls.push_back(d); }
 
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    void visitChildren(Visitor *visitor);
 
     sqvector<VarDecl *> &declarations() { return _decls; }
     const sqvector<VarDecl *> &declarations() const { return _decls; }
@@ -700,15 +760,14 @@ class DesctructionDecl : public DeclGroup {
 public:
     DesctructionDecl(Arena *arena, enum DestructuringType dt) : DeclGroup(arena, TO_DESTRUCT), _dt_type(dt) {}
 
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    void visitChildren(Visitor *visitor);
 
     void setExpression(Expr *expr) { _expr = expr; }
     Expr *initiExpression() const { return _expr; }
 
     enum DestructuringType type() const { return _dt_type; }
 
-//private:
+private:
     Expr *_expr;
     enum DestructuringType _dt_type;
 };
@@ -722,8 +781,7 @@ public:
     sqvector<Statement *> &statements() { return _statements; }
     const sqvector<Statement *> &statements() const { return _statements; }
 
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    void visitChildren(Visitor *visitor);
 
     bool isRoot() const { return _is_root; }
 
@@ -732,6 +790,7 @@ public:
 
     SQInteger startLine() const { return linePos(); }
     SQInteger endLine() const { return _endLine; }
+
 private:
     SQInteger _endLine;
     bool _is_root;
@@ -741,22 +800,19 @@ private:
 class RootBlock : public Block {
 public:
     RootBlock(Arena *arena) : Block(arena, true) {}
-
-
 };
 
 class IfStatement : public Statement {
 public:
     IfStatement(Expr *cond, Statement *thenB, Statement *elseB) : Statement(TO_IF), _cond(cond), _thenB(thenB), _elseB(elseB) {}
 
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    void visitChildren(Visitor *visitor);
 
     Expr *condition() const { return _cond; }
     Statement *thenBranch() const { return _thenB; }
     Statement *elseBranch() const { return _elseB; }
 
-//private:
+private:
     Expr *_cond;
     Statement *_thenB;
     Statement *_elseB;
@@ -766,13 +822,11 @@ class LoopStatement : public Statement {
 protected:
     LoopStatement(enum TreeOp op, Statement *body) : Statement(op), _body(body) {}
 public:
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    void visitChildren(Visitor *visitor);
 
     Statement *body() const { return _body; }
 
-//private:
-public:
+private:
     Statement *_body;
 };
 
@@ -780,24 +834,23 @@ class WhileStatement : public LoopStatement {
 public:
     WhileStatement(Expr *cond, Statement *body) : LoopStatement(TO_WHILE, body), _cond(cond) {}
 
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    void visitChildren(Visitor *visitor);
 
     Expr *condition() const { return _cond;  }
 
-//private:
+private:
     Expr *_cond;
 };
 
 class DoWhileStatement : public LoopStatement {
 public:
     DoWhileStatement(Statement *body, Expr *cond) : LoopStatement(TO_DOWHILE, body), _cond(cond) {}
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    
+    void visitChildren(Visitor *visitor);
 
     Expr *condition() const { return _cond; }
 
-//private:
+private:
     Expr *_cond;
 };
 
@@ -805,15 +858,14 @@ class ForStatement : public LoopStatement {
 public:
     ForStatement(Node *init, Expr *cond, Expr *mod, Statement *body) : LoopStatement(TO_FOR, body), _init(init), _cond(cond), _mod(mod) {}
 
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    void visitChildren(Visitor *visitor);
 
     Node *initializer() const { return _init; }
     Expr *condition() const { return _cond; }
     Expr *modifier() const { return _mod; }
 
 
-//private:
+private:
     Node *_init;
     Expr *_cond;
     Expr *_mod;
@@ -823,14 +875,13 @@ class ForeachStatement : public LoopStatement {
 public:
     ForeachStatement(Id *idx, Id *val, Expr *container, Statement *body) : LoopStatement(TO_FOREACH, body), _idx(idx), _val(val), _container(container) {}
 
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    void visitChildren(Visitor *visitor);
 
     Expr *container() const { return _container; }
     Id *idx() const { return _idx; }
     Id *val() const { return _val; }
 
-//private:
+private:
     Id *_idx;
     Id *_val;
     Expr *_container;
@@ -858,10 +909,9 @@ public:
     Expr *expression() const { return _expr; }
     const SwitchCase &defaultCase() const { return _defaultCase; }
 
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    void visitChildren(Visitor *visitor);
 
-//private:
+private:
     Expr *_expr;
     sqvector<SwitchCase> _cases;
     SwitchCase _defaultCase;
@@ -871,14 +921,13 @@ class TryStatement : public Statement {
 public:
     TryStatement(Statement *t, Id *exc, Statement *c) : Statement(TO_TRY), _tryStmt(t), _exception(exc), _catchStmt(c) {}
 
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    void visitChildren(Visitor *visitor);
 
     Statement *tryStatement() const { return _tryStmt; }
     Id *exceptionId() const { return _exception; }
     Statement *catchStatement() const { return _catchStmt; }
 
-//private:
+private:
     Statement *_tryStmt;
     Id *_exception;
     Statement *_catchStmt;
@@ -888,13 +937,11 @@ class TerminateStatement : public Statement {
 protected:
     TerminateStatement(enum TreeOp op, Expr *arg) : Statement(op), _arg(arg) {}
 public:
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    void visitChildren(Visitor *visitor);
 
     Expr *argument() const { return _arg; }
 
-//private:
-public:
+private:
     Expr *_arg;
 };
 
@@ -902,7 +949,6 @@ class ReturnStatement : public TerminateStatement {
 public:
     ReturnStatement(Expr *arg) : TerminateStatement(TO_RETURN, arg), _isLambda(false) {}
 
-    void visit(Visitor &visitor) override;
 
     void setIsLambda() { _isLambda = true; }
     bool isLambdaReturn() const { return _isLambda; }
@@ -915,28 +961,24 @@ class YieldStatement : public TerminateStatement {
 public:
     YieldStatement(Expr *arg) : TerminateStatement(TO_YIELD, arg) {}
 
-    void visit(Visitor &visitor) override;
 };
 
 class ThrowStatement : public TerminateStatement {
 public:
     ThrowStatement(Expr *arg) : TerminateStatement(TO_THROW, arg) { assert(arg); }
 
-    void visit(Visitor &visitor) override;
 };
 
 class JumpStatement : public Statement {
 protected:
     JumpStatement(enum TreeOp op) : Statement(op) {}
-
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+public:
+    void visitChildren(Visitor *visitor) {}
 };
 
 class BreakStatement : public JumpStatement {
 public:
     BreakStatement(Statement *breakTarget) : JumpStatement(TO_BREAK), _target(breakTarget) {}
-    void visit(Visitor &visitor) override;
 
 private:
     Statement *_target;
@@ -946,7 +988,6 @@ class ContinueStatement : public JumpStatement {
 public:
     ContinueStatement(LoopStatement *target) : JumpStatement(TO_CONTINUE), _target(target) {}
 
-    void visit(Visitor &visitor) override;
 private:
     LoopStatement *_target;
 };
@@ -955,12 +996,11 @@ class ExprStatement : public Statement {
 public:
     ExprStatement(Expr *expr) : Statement(TO_EXPR_STMT), _expr(expr) {}
 
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    void visitChildren(Visitor *visitor);
 
     Expr *expression() const { return _expr; }
 
-//private:
+private:
     Expr *_expr;
 };
 
@@ -968,8 +1008,7 @@ class EmptyStatement : public Statement {
 public:
     EmptyStatement() : Statement(TO_EMPTY) {}
 
-    void visit(Visitor &visitor) override;
-    void visitChildren(Visitor &visitor) override;
+    void visitChildren(Visitor *visitor) {}
 };
 
 class Visitor {
@@ -978,7 +1017,7 @@ protected:
 public:
     virtual ~Visitor() {}
 
-    virtual void visitNode(Node *node) { node->visitChildren(*this); }
+    virtual void visitNode(Node *node) { node->visitChildren(this); }
 
     virtual void visitExpr(Expr *expr) { visitNode(expr); }
     virtual void visitUnExpr(UnExpr *expr) { visitExpr(expr); }
@@ -992,8 +1031,6 @@ public:
     virtual void visitSetTableExpr(SetTableExpr *expr) { visitExpr(expr); }
     virtual void visitBaseExpr(BaseExpr *expr) { visitExpr(expr); }
     virtual void visitRootExpr(RootExpr *expr) { visitExpr(expr); }
-    virtual void visitThisExpr(ThisExpr *expr) { visitExpr(expr); }
-    virtual void visitCalleeExpr(CalleeExpr *expr) { visitExpr(expr); }
     virtual void visitLiteralExpr(LiteralExpr *expr) { visitExpr(expr); }
     virtual void visitIncExpr(IncExpr *expr) { visitExpr(expr); }
     virtual void visitDeclExpr(DeclExpr *expr) { visitExpr(expr); }

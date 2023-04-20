@@ -21,12 +21,6 @@
 #include <iostream>
 #include <ostream>
 
-#define EXPR   1
-#define OBJECT 2
-#define BASE   3
-#define LOCAL  4
-#define OUTER  5
-
 #ifndef SQ_LINE_INFO_IN_STRUCTURES
 #  define SQ_LINE_INFO_IN_STRUCTURES 1
 #endif
@@ -50,6 +44,7 @@ enum SQExpressionContext
 };
 
 
+#ifdef _DEBUG_DUMP
 
 class RenderVisitor : public Visitor {
 
@@ -110,7 +105,7 @@ public:
     SQInteger _indent;
 
     void render(Node *n) {
-        n->visit(*this);
+        n->visit(this);
         _out << std::endl;
     }
 
@@ -121,29 +116,29 @@ public:
         else {
             _out << treeopToStr(expr->op());
         }
-        expr->_arg->visit(*this);
+        expr->argument()->visit(this);
         if (expr->op() == TO_PAREN) {
             _out << ")";
         }
     }
     virtual void visitBinExpr(BinExpr *expr) {
-        expr->_lhs->visit(*this);
+        expr->_lhs->visit(this);
         _out << treeopToStr(expr->op());
-        expr->_rhs->visit(*this);
+        expr->_rhs->visit(this);
     }
     virtual void visitTerExpr(TerExpr *expr) { 
-        expr->a()->visit(*this);
+        expr->a()->visit(this);
         _out << " ? ";
-        expr->b()->visit(*this);
+        expr->b()->visit(this);
         _out << " : ";
-        expr->c()->visit(*this);
+        expr->c()->visit(this);
     }
     virtual void visitCallExpr(CallExpr *expr) { 
-        expr->callee()->visit(*this);
+        expr->callee()->visit(this);
         _out << "(";
         for (int i = 0; i < expr->arguments().size(); ++i) {
             if (i) _out << ", ";
-            expr->arguments()[i]->visit(*this);
+            expr->arguments()[i]->visit(this);
         }
         _out << ")";
 
@@ -151,39 +146,37 @@ public:
     virtual void visitId(Id *id) { _out << id->id(); }
 
     virtual void visitGetFieldExpr(GetFieldExpr *expr) { 
-        expr->receiver()->visit(*this);
+        expr->receiver()->visit(this);
         if (expr->isNullable()) _out << '?';
         _out << '.';
         _out << expr->fieldName();
     }
     virtual void visitSetFieldExpr(SetFieldExpr *expr) {
-        expr->receiver()->visit(*this);
+        expr->receiver()->visit(this);
         if (expr->isNullable()) _out << '?';
         _out << '.';
         _out << expr->fieldName();
         _out << " = ";
-        expr->value()->visit(*this);
+        expr->value()->visit(this);
     }
     virtual void visitGetTableExpr(GetTableExpr *expr) {
-        expr->receiver()->visit(*this);
+        expr->receiver()->visit(this);
         if (expr->isNullable()) _out << '?';
         _out << '[';
-        expr->key()->visit(*this);
+        expr->key()->visit(this);
         _out << ']';
     }
     virtual void visitSetTableExpr(SetTableExpr *expr) {
-        expr->receiver()->visit(*this);
+        expr->receiver()->visit(this);
         if (expr->isNullable()) _out << '?';
         _out << '[';
-        expr->key()->visit(*this);
+        expr->key()->visit(this);
         _out << ']';
         _out << " = ";
-        expr->value()->visit(*this);
+        expr->value()->visit(this);
     }
     virtual void visitBaseExpr(BaseExpr *expr) { _out << "base"; }
     virtual void visitRootExpr(RootExpr *expr) { _out << "::"; }
-    virtual void visitThisExpr(ThisExpr *expr) { _out << "this"; }
-    virtual void visitCalleeExpr(CalleeExpr *expr) { _out << "<callee>";; }
     virtual void visitLiteralExpr(LiteralExpr *expr) {
         switch (expr->kind())
         {
@@ -201,7 +194,7 @@ public:
         const char *op = expr->diff() < 0 ? "--" : "++";
 
         if (expr->form() == IF_PREFIX) _out << op;
-        expr->argument()->visit(*this);
+        expr->argument()->visit(this);
         if (expr->form() == IF_POSTFIX) _out << op;
     }
 
@@ -209,7 +202,7 @@ public:
         _out << "[";
         for (int i = 0; i < expr->initialziers().size(); ++i) {
             if (i) _out << ", ";
-            expr->initialziers()[i]->visit(*this);
+            expr->initialziers()[i]->visit(this);
         }
         _out << "]";
     }
@@ -217,13 +210,9 @@ public:
     virtual void visitCommaExpr(CommaExpr *expr) { 
         for (int i = 0; i < expr->expressions().size(); ++i) {
             if (i) _out << ", ";
-            expr->expressions()[i]->visit(*this);
+            expr->expressions()[i]->visit(this);
         }
     }
-
-    //virtual void visitDeclExpr(DeclExpr *expr) {
-    //    expr->_decl->visit(*this);
-    //}
 
     virtual void visitBlock(Block *block) { 
         _out << "{" << std::endl;
@@ -233,7 +222,7 @@ public:
         for (int i = 0; i < stmts.size(); ++i) {
             indent(_indent);
             Statement *stmt = stmts[i];
-            stmt->visit(*this);
+            stmt->visit(this);
             _out << std::endl;
         }
         indent(cur);
@@ -242,17 +231,17 @@ public:
     }
     virtual void visitIfStatement(IfStatement *ifstmt) { 
         _out << "IF (";
-        ifstmt->_cond->visit(*this);
+        ifstmt->condition()->visit(this);
         _out << ")" << std::endl;
         indent(_indent);
         _out << "THEN ";
         _indent += 2;
-        ifstmt->_thenB->visit(*this);
-        if (ifstmt->_elseB) {
+        ifstmt->thenBranch()->visit(this);
+        if (ifstmt->elseBranch()) {
             _out << std::endl;
             indent(_indent - 2);
             _out << "ELSE ";
-            ifstmt->_elseB->visit(*this);
+            ifstmt->elseBranch()->visit(this);
         }
         _indent -= 2;
         _out << std::endl;
@@ -262,11 +251,11 @@ public:
     }
     virtual void visitLoopStatement(LoopStatement *loop) { 
         indent(_indent);
-        loop->_body->visit(*this);
+        loop->body()->visit(this);
     }
     virtual void visitWhileStatement(WhileStatement *loop) {
         _out << "WHILE (";
-        loop->_cond->visit(*this);
+        loop->condition()->visit(this);
         _out << ")" << std::endl;
         _indent += 2;
         visitLoopStatement(loop);
@@ -284,19 +273,19 @@ public:
 
         indent(_indent);
         _out << "WHILE (" << std::endl;
-        loop->_cond->visit(*this);
+        loop->condition()->visit(this);
         _out << ")";
     }
     virtual void visitForStatement(ForStatement *loop) { 
         _out << "FOR (";
 
-        if (loop->_init) loop->_init->visit(*this);
+        if (loop->initializer()) loop->initializer()->visit(this);
         _out << "; ";
 
-        if (loop->_cond) loop->_cond->visit(*this);
+        if (loop->condition()) loop->condition()->visit(this);
         _out << "; ";
 
-        if (loop->_mod) loop->_mod->visit(*this);
+        if (loop->modifier()) loop->modifier()->visit(this);
         _out << ")" << std::endl;
 
 
@@ -312,13 +301,13 @@ public:
     virtual void visitForeachStatement(ForeachStatement *loop) { 
         _out << "FOR_EACH ( {";
 
-        visitId(loop->_idx);
+        visitId(loop->idx());
         _out << ", ";
 
-        visitId(loop->_val);
+        visitId(loop->val());
         _out << "} in ";
 
-        loop->_container->visit(*this);
+        loop->container()->visit(this);
         _out << ")" << std::endl;
 
         _indent += 2;
@@ -331,7 +320,7 @@ public:
     }
     virtual void visitSwitchStatement(SwitchStatement *swtch) { 
         _out << "SWITCH (";
-        swtch->_expr->visit(*this);
+        swtch->expression()->visit(this);
         _out << ")" << std::endl;
         int cur = _indent;
         _indent += 2;
@@ -340,16 +329,16 @@ public:
             SwitchCase &c = swtch->cases()[i];
             indent(cur);
             _out << "CASE ";
-            c.val->visit(*this);
+            c.val->visit(this);
             _out << ": ";
-            c.stmt->visit(*this);
+            c.stmt->visit(this);
             _out << std::endl;
         }
 
-        if (swtch->_defaultCase.stmt) {
+        if (swtch->defaultCase().stmt) {
             indent(cur);
             _out << "DEFAULT: ";
-            swtch->_defaultCase.stmt->visit(*this);
+            swtch->defaultCase().stmt->visit(this);
             _out << std::endl;
         }
 
@@ -358,18 +347,18 @@ public:
     virtual void visitTryStatement(TryStatement *tr) {
         _out << "TRY ";
         //_indent += 2;
-        tr->_tryStmt->visit(*this);
+        tr->tryStatement()->visit(this);
         _out << std::endl;
         indent(_indent);
         _out << "CATCH (";
-        visitId(tr->_exception);
+        visitId(tr->exceptionId());
         _out << ") ";
-        tr->_catchStmt->visit(*this);
+        tr->catchStatement()->visit(this);
         _out << std::endl;
         indent(_indent);
         _out << "END_TRY";
     }
-    virtual void visitTerminateStatement(TerminateStatement *term) { if (term->_arg) term->_arg->visit(*this); }
+    virtual void visitTerminateStatement(TerminateStatement *term) { if (term->argument()) term->argument()->visit(this); }
     virtual void visitReturnStatement(ReturnStatement *ret) { 
         _out << "RETURN ";
         visitTerminateStatement(ret);
@@ -382,21 +371,18 @@ public:
         _out << "THROW ";
         visitTerminateStatement(thr);
     }
-    //virtual void visitJumpStatement(JumpStatement *jmp) { visitStmt(jmp); }
     virtual void visitBreakStatement(BreakStatement *jmp) { _out << "BREAK"; }
     virtual void visitContinueStatement(ContinueStatement *jmp) { _out << "CONTINUE"; }
-    virtual void visitExprStatement(ExprStatement *estmt) { estmt->_expr->visit(*this); }
+    virtual void visitExprStatement(ExprStatement *estmt) { estmt->expression()->visit(this); }
     virtual void visitEmptyStatement(EmptyStatement *empty) { _out << ";"; }
 
     virtual void visitValueDecl(ValueDecl *decl) { 
-        visitId(decl->_name);
-        if (decl->_expr) {
+        visitId(decl->name());
+        if (decl->expression()) {
             _out << " = ";
-            decl->_expr->visit(*this);
+            decl->expression()->visit(this);
         }
     }
-    //virtual void visitVarDecl(VarDecl *decl) { visitValueDecl(decl); }
-    //virtual void visitParamDecl(ParamDecl *decl) { visitValueDecl(decl); }
     virtual void visitTableDecl(TableDecl *tbl) { 
         _out << "{" << std::endl;
         _indent += 2;
@@ -404,9 +390,9 @@ public:
             TableMember &m = tbl->members()[i];
             indent(_indent);
             if (m.isStatic) _out << "STATIC ";
-            m.key->visit(*this);
+            m.key->visit(this);
             _out << " <- ";
-            m.value->visit(*this);
+            m.value->visit(this);
             _out << std::endl;
         }
         _indent -= 2;
@@ -415,19 +401,19 @@ public:
     }
     virtual void visitClassDecl(ClassDecl *cls) { 
         _out << "CLASS ";
-        if (cls->classKey()) cls->classKey()->visit(*this);
+        if (cls->classKey()) cls->classKey()->visit(this);
         if (cls->classBase()) {
             _out << " EXTENDS ";
-            cls->classBase()->visit(*this);
+            cls->classBase()->visit(this);
             _out << ' ';
         }
         visitTableDecl(cls);
     }
     virtual void visitFunctionDecl(FunctionDecl *f) {
         _out << "FUNCTION";
-        if (f->_name) {
+        if (f->name()) {
             _out << " ";
-            visitId(f->_name);
+            visitId(f->name());
         }
 
         _out << '(';
@@ -436,31 +422,32 @@ public:
             visitParamDecl(f->parameters()[i]);
         }
 
-        if (f->_vararg) {
+        if (f->isVararg()) {
             _out << ", ...";
         }
         _out << ") ";
 
-        f->_body->visit(*this);
+        f->body()->visit(this);
     }
     virtual void visitConstructorDecl(ConstructorDecl *ctr) { visitFunctionDecl(ctr); }
     virtual void visitConstDecl(ConstDecl *cnst) {
-        if (cnst->_global) _out << "G ";
-        visitId(cnst->_id);
+        if (cnst->isGlobal()) _out << "G ";
+        visitId(cnst->name());
         _out << " = ";
-        _out << "(TODO -- RENDER OBJECT)";
+        cnst->value()->visit(this);
     }
     virtual void visitEnumDecl(EnumDecl *enm) { 
         _out << "ENUM ";
-        visitId(enm->_id);
+        visitId(enm->name());
         _out << std::endl;
         _indent += 2;
-        for (int i = 0; i < enm->_consts.size(); ++i) {
-            EnumConst &c = enm->_consts[i];
+        for (int i = 0; i < enm->consts().size(); ++i) {
+            EnumConst &c = enm->consts()[i];
             indent(_indent);
-            visitId(enm->_id);
+            visitId(c.id);
             _out << " = ";
-            _out << "(TODO -- RENDER OBJECT)" << std::endl;
+            c.val->visit(this);
+            _out << std::endl;
         }
         _indent -= 2;
         indent(_indent);
@@ -470,7 +457,7 @@ public:
     virtual void visitDeclGroup(DeclGroup *grp) {
         for (int i = 0; i < grp->declarations().size(); ++i) {
             if (i) _out << ", ";
-            grp->declarations()[i]->visit(*this);
+            grp->declarations()[i]->visit(this);
         }
     }
 
@@ -478,12 +465,14 @@ public:
         _out << "{ ";
         for (int i = 0; i < destruct->declarations().size(); ++i) {
             if (i) _out << ", ";
-            destruct->declarations()[i]->visit(*this);
+            destruct->declarations()[i]->visit(this);
         }
         _out << " } = ";
-        destruct->_expr->visit(*this);
+        destruct->initiExpression()->visit(this);
     }
 };
+
+#endif // _DEBUG_DUMP
 
 
 #define BEGIN_SCOPE() SQScope __oldscope__ = _scope; \
@@ -683,11 +672,7 @@ public:
 
     void visitBaseExpr(BaseExpr *base) override;
 
-    void visitCalleeExpr(CalleeExpr *expr) override;
-
     void visitRootExpr(RootExpr *expr) override;
-
-    void visitThisExpr(ThisExpr *expr) override;
 
     void visitLiteralExpr(LiteralExpr *lit) override;
 
@@ -741,8 +726,6 @@ class SQParser
 
 public:
 
-    bool lineInfo() { return _lineinfo; }
-
     SQParser(SQVM *v, SQLEXREADFUNC rg, SQUserPointer up, const SQChar* sourcename, Arena *astArena, bool raiseerror, bool lineinfo) :
       _lex(_ss(v)),
       _astArena(astArena)
@@ -750,7 +733,7 @@ public:
         _vm=v;
         _lex.Init(_ss(v), rg, up,ThrowError,this);
         _sourcename = sourcename;
-        _lineinfo = lineinfo;_raiseerror = raiseerror;
+        _raiseerror = raiseerror;
         _compilererror[0] = _SC('\0');
         _expression_context = SQE_REGULAR;
     }
@@ -1762,7 +1745,6 @@ public:
         Node *init = NULL;
         if (_token == TK_LOCAL) init = parseLocalDeclStatement(true);
         else if (_token != _SC(';')) {
-            // TODO:
             init = parseCommaExpr(SQE_REGULAR);
         }
         Expect(_SC(';'));
@@ -2004,7 +1986,7 @@ public:
 
     Expr *DeleteExpr()
     {
-        Lex();
+        Consume(TK_DELETE);
         Expr *arg = PrefixedExpr();
         return newNode<UnExpr>(TO_DELETE, arg);
     }
@@ -2083,13 +2065,10 @@ public:
         return f;
     }
 
-
 private:
     SQInteger _token;
-    SQFuncState *_fs;
     const SQChar *_sourcename;
     SQLexer _lex;
-    bool _lineinfo;
     bool _raiseerror;
     SQExpressionContext _expression_context;
     SQChar _compilererror[MAX_COMPILER_ERROR_LEN];
@@ -2107,8 +2086,11 @@ bool Compile(SQVM *vm,SQLEXREADFUNC rg, SQUserPointer up, const HSQOBJECT *bindi
 
     RootBlock *r = p.parse();
 
+#ifdef _DEBUG_DUMP
     RenderVisitor v(std::cout);
     v.render(r);
+#endif // _DEBUG_DUMP
+
 
     SQFuncState::reset();
 
@@ -2166,7 +2148,7 @@ void CodegenVisitor::generate(RootBlock *root, SQObjectPtr &out) {
 
         SQInteger stacksize = _fs->GetStackSize();
 
-        root->visit(*this);
+        root->visit(this);
 
         _fs->SetStackSize(stacksize);
         _fs->AddLineInfos(root->endLine(), _lineinfo, true);
@@ -2181,7 +2163,9 @@ void CodegenVisitor::generate(RootBlock *root, SQObjectPtr &out) {
 
         out = _fs->BuildProto();
 
+#ifdef _DEBUG_DUMP
         _fs->Dump(_funcproto(out));
+#endif // _DEBUG_DUMP
 
         _fs = NULL;
     } else {
@@ -2300,7 +2284,7 @@ void CodegenVisitor::visitBlock(Block *block) {
 
     for (int i = 0; i < statements.size(); ++i) {
         Statement *stmt = statements[i];
-        stmt->visit(*this);
+        stmt->visit(this);
         _fs->SnoozeOpt();
     }
 
@@ -2311,19 +2295,19 @@ void CodegenVisitor::visitIfStatement(IfStatement *ifStmt) {
     addLineNumber(ifStmt);
     BEGIN_SCOPE();
 
-    ifStmt->condition()->visit(*this);
+    ifStmt->condition()->visit(this);
 
     _fs->AddInstruction(_OP_JZ, _fs->PopTarget());
     SQInteger jnepos = _fs->GetCurrentPos();
     
-    ifStmt->thenBranch()->visit(*this);
+    ifStmt->thenBranch()->visit(this);
 
     SQInteger endifblock = _fs->GetCurrentPos();
 
     if (ifStmt->elseBranch()) {
         _fs->AddInstruction(_OP_JMP);
         SQInteger jmppos = _fs->GetCurrentPos();
-        ifStmt->elseBranch()->visit(*this);
+        ifStmt->elseBranch()->visit(this);
         _fs->SetInstructionParam(jmppos, 1, _fs->GetCurrentPos() - jmppos);
     }
 
@@ -2338,7 +2322,7 @@ void CodegenVisitor::visitWhileStatement(WhileStatement *whileLoop) {
     {
         SQInteger jmppos = _fs->GetCurrentPos();
 
-        whileLoop->condition()->visit(*this);
+        whileLoop->condition()->visit(this);
 
         BEGIN_BREAKBLE_BLOCK();
 
@@ -2348,7 +2332,7 @@ void CodegenVisitor::visitWhileStatement(WhileStatement *whileLoop) {
 
         BEGIN_SCOPE();
 
-        whileLoop->body()->visit(*this);
+        whileLoop->body()->visit(this);
 
         END_SCOPE();
 
@@ -2369,11 +2353,11 @@ void CodegenVisitor::visitDoWhileStatement(DoWhileStatement *doWhileLoop) {
         BEGIN_BREAKBLE_BLOCK();
 
         BEGIN_SCOPE();
-        doWhileLoop->body()->visit(*this);
+        doWhileLoop->body()->visit(this);
         END_SCOPE();
 
         SQInteger continuetrg = _fs->GetCurrentPos();
-        doWhileLoop->condition()->visit(*this);
+        doWhileLoop->condition()->visit(this);
 
         _fs->AddInstruction(_OP_JZ, _fs->PopTarget(), 1);
         _fs->AddInstruction(_OP_JMP, 0, jmptrg - _fs->GetCurrentPos() - 1);
@@ -2390,7 +2374,7 @@ void CodegenVisitor::visitForStatement(ForStatement *forLoop) {
 
     if (forLoop->initializer()) {
         Node *init = forLoop->initializer();
-        init->visit(*this);
+        init->visit(this);
         if (init->isExpression()) {
             _fs->PopTarget();
         }
@@ -2401,7 +2385,7 @@ void CodegenVisitor::visitForStatement(ForStatement *forLoop) {
     SQInteger jzpos = -1;
 
     if (forLoop->condition()) {
-        forLoop->condition()->visit(*this);
+        forLoop->condition()->visit(this);
         _fs->AddInstruction(_OP_JZ, _fs->PopTarget());
         jzpos = _fs->GetCurrentPos();
     }
@@ -2411,7 +2395,7 @@ void CodegenVisitor::visitForStatement(ForStatement *forLoop) {
     SQInteger expstart = _fs->GetCurrentPos() + 1;
 
     if (forLoop->modifier()) {
-        forLoop->modifier()->visit(*this);
+        forLoop->modifier()->visit(this);
         _fs->PopTarget();
     }
 
@@ -2428,7 +2412,7 @@ void CodegenVisitor::visitForStatement(ForStatement *forLoop) {
     }
 
     BEGIN_BREAKBLE_BLOCK();
-    forLoop->body()->visit(*this);
+    forLoop->body()->visit(this);
     SQInteger continuetrg = _fs->GetCurrentPos();
     if (expsize > 0) {
         for (SQInteger i = 0; i < expsize; i++)
@@ -2447,7 +2431,7 @@ void CodegenVisitor::visitForeachStatement(ForeachStatement *foreachLoop) {
     addLineNumber(foreachLoop);
     BEGIN_SCOPE();
 
-    foreachLoop->container()->visit(*this);
+    foreachLoop->container()->visit(this);
 
     SQInteger container = _fs->TopTarget();
     SQObject idxName = _fs->CreateString(foreachLoop->idx()->id());
@@ -2472,7 +2456,7 @@ void CodegenVisitor::visitForeachStatement(ForeachStatement *foreachLoop) {
     _fs->AddInstruction(_OP_POSTFOREACH, container, 0, indexpos);
 
     BEGIN_BREAKBLE_BLOCK();
-    foreachLoop->body()->visit(*this);
+    foreachLoop->body()->visit(this);
     _fs->AddInstruction(_OP_JMP, 0, jmppos - _fs->GetCurrentPos() - 1);
     _fs->SetInstructionParam(foreachpos, 1, _fs->GetCurrentPos() - foreachpos);
     _fs->SetInstructionParam(foreachpos + 1, 1, _fs->GetCurrentPos() - foreachpos);
@@ -2486,7 +2470,7 @@ void CodegenVisitor::visitSwitchStatement(SwitchStatement *swtch) {
     addLineNumber(swtch);
     BEGIN_SCOPE();
 
-    swtch->expression()->visit(*this);
+    swtch->expression()->visit(this);
 
     SQInteger expr = _fs->TopTarget();
     SQInteger tonextcondjmp = -1;
@@ -2506,7 +2490,7 @@ void CodegenVisitor::visitSwitchStatement(SwitchStatement *swtch) {
 
         const SwitchCase &c = cases[i];
 
-        c.val->visit(*this);
+        c.val->visit(this);
 
         SQInteger trg = _fs->PopTarget();
         SQInteger eqtarget = trg;
@@ -2528,7 +2512,7 @@ void CodegenVisitor::visitSwitchStatement(SwitchStatement *swtch) {
         tonextcondjmp = _fs->GetCurrentPos();
 
         BEGIN_SCOPE();
-        c.stmt->visit(*this);
+        c.stmt->visit(this);
         END_SCOPE();
     }
 
@@ -2539,7 +2523,7 @@ void CodegenVisitor::visitSwitchStatement(SwitchStatement *swtch) {
 
     if (d.stmt) {
         BEGIN_SCOPE();
-        d.stmt->visit(*this);
+        d.stmt->visit(this);
         END_SCOPE();
     }
 
@@ -2562,7 +2546,7 @@ void CodegenVisitor::visitTryStatement(TryStatement *tryStmt) {
     SQInteger trappos = _fs->GetCurrentPos();
     {
         BEGIN_SCOPE();
-        tryStmt->tryStatement()->visit(*this);
+        tryStmt->tryStatement()->visit(this);
         END_SCOPE();
     }
 
@@ -2578,7 +2562,7 @@ void CodegenVisitor::visitTryStatement(TryStatement *tryStmt) {
         BEGIN_SCOPE();
         SQInteger ex_target = _fs->PushLocalVariable(_fs->CreateString(tryStmt->exceptionId()->id()), false);
         _fs->SetInstructionParam(trappos, 0, ex_target);
-        tryStmt->catchStatement()->visit(*this);
+        tryStmt->catchStatement()->visit(this);
         _fs->SetInstructionParams(jmppos, 0, (_fs->GetCurrentPos() - jmppos), 0);
         END_SCOPE();
     }
@@ -2609,7 +2593,7 @@ void CodegenVisitor::visitContinueStatement(ContinueStatement *continueStmt) {
 void CodegenVisitor::visitTerminateStatement(TerminateStatement *terminator) {
     addLineNumber(terminator);
     if (terminator->argument()) {
-        terminator->argument()->visit(*this);
+        terminator->argument()->visit(this);
     }
 }
 
@@ -2653,7 +2637,7 @@ void CodegenVisitor::visitThrowStatement(ThrowStatement *throwStmt) {
 
 void CodegenVisitor::visitExprStatement(ExprStatement *stmt) {
     addLineNumber(stmt);
-    stmt->expression()->visit(*this);
+    stmt->expression()->visit(this);
     _fs->DiscardTarget();
 }
 
@@ -2673,8 +2657,8 @@ void CodegenVisitor::generateTableDecl(TableDecl *tableDecl) {
 #endif
         CheckMemberUniqueness(memberConstantKeys, m.key);
 
-        m.key->visit(*this);
-        m.value->visit(*this);
+        m.key->visit(this);
+        m.value->visit(this);
         SQInteger val = _fs->PopTarget();
         SQInteger key = _fs->PopTarget();
         SQInteger table = _fs->TopTarget(); //<<BECAUSE OF THIS NO COMMON EMIT FUNC IS POSSIBLE
@@ -2726,7 +2710,7 @@ void CodegenVisitor::visitClassDecl(ClassDecl *klass) {
     Expr *baseExpr = klass->classBase();
     SQInteger baseIdx = -1;
     if (baseExpr) {
-        baseExpr->visit(*this);
+        baseExpr->visit(this);
         baseIdx = _fs->PopTarget();
     }
 
@@ -2743,7 +2727,7 @@ void CodegenVisitor::visitClassDecl(ClassDecl *klass) {
 void CodegenVisitor::visitParamDecl(ParamDecl *param) {
     _funcState->AddParameter(_fs->CreateString(param->name()->id()));
     if (param->hasDefaultValue()) {
-        param->defaultValue()->visit(*this);
+        param->defaultValue()->visit(this);
     }
 }
 
@@ -2782,7 +2766,7 @@ void CodegenVisitor::visitVarDecl(VarDecl *var) {
     CheckDuplicateLocalIdentifier(varName, varDescriptor(var), false);
 
     if (var->initializer()) {
-        var->initializer()->visit(*this);
+        var->initializer()->visit(this);
         SQInteger src = _fs->PopTarget();
         SQInteger dest = _fs->PushTarget();
         if (dest != src) _fs->AddInstruction(_OP_MOVE, dest, src);
@@ -2801,7 +2785,7 @@ void CodegenVisitor::visitDeclGroup(DeclGroup *group) {
 
     for (int i = 0; i < declarations.size(); ++i) {
         Decl *d = declarations[i];
-        d->visit(*this);
+        d->visit(this);
     }
 }
 
@@ -2812,13 +2796,13 @@ void CodegenVisitor::visitDesctructionDecl(DesctructionDecl *destruct) {
     const auto declarations = destruct->declarations();
 
     for (int i = 0; i < declarations.size(); ++i) {
-        declarations[i]->visit(*this);
+        declarations[i]->visit(this);
         assert(_last_pop != -1);
         targets.push_back(_last_pop);
         _last_pop = -1;
     }
 
-    destruct->initiExpression()->visit(*this);
+    destruct->initiExpression()->visit(this);
 
     SQInteger src = _fs->TopTarget();
     SQInteger key_pos = _fs->PushTarget();
@@ -2856,7 +2840,7 @@ void CodegenVisitor::visitFunctionDecl(FunctionDecl *func) {
     for (int i = 0; i < parameters.size(); ++i) {
         ParamDecl *param = parameters[i];
         if (param->hasDefaultValue()) ++defparams;
-        param->visit(*this);
+        param->visit(this);
     }
 
     for (SQInteger n = 0; n < defparams; n++) {
@@ -2871,7 +2855,7 @@ void CodegenVisitor::visitFunctionDecl(FunctionDecl *func) {
     if (startLine != -1) {
         funcstate->AddLineInfos(startLine, _lineinfo, false);
     }
-    func->body()->visit(*this);
+    func->body()->visit(this);
     funcstate->AddLineInfos(body->endLine(), _lineinfo, true);
     SQInstruction &i = funcstate->GetInstruction(funcstate->GetCurrentPos());
     funcstate->AddInstruction(_OP_RETURN, -1);
@@ -2883,7 +2867,11 @@ void CodegenVisitor::visitFunctionDecl(FunctionDecl *func) {
     _fs = currchunk;
 
     _fs->_functions.push_back(funcProto);
+
+#ifdef _DEBUG_DUMP
     funcstate->Dump(funcProto);
+#endif // _DEBUG_DUMP
+
     _fs->PopChildState();
 
     _fs->AddInstruction(_OP_CLOSURE, _fs->PushTarget(), _fs->_functions.size() - 1, 0);
@@ -3017,7 +3005,7 @@ void CodegenVisitor::visitCallExpr(CallExpr *call) {
     const auto args = call->arguments();
 
     for (int i = 0; i < args.size(); ++i) {
-        args[i]->visit(*this);
+        args[i]->visit(this);
         MoveIfCurrentTargetIsLocal();
     }
 
@@ -3039,18 +3027,9 @@ void CodegenVisitor::visitBaseExpr(BaseExpr *base) {
     base->setPos(_fs->TopTarget());
 }
 
-void CodegenVisitor::visitCalleeExpr(CalleeExpr *expr) {
-    maybeAddInExprLine(expr);
-    _fs->AddInstruction(_OP_LOADCALLEE, _fs->PushTarget());
-}
-
 void CodegenVisitor::visitRootExpr(RootExpr *expr) {
     maybeAddInExprLine(expr);
     _fs->AddInstruction(_OP_LOADROOT, _fs->PushTarget());
-}
-
-void CodegenVisitor::visitThisExpr(ThisExpr *expr) {
-
 }
 
 void CodegenVisitor::visitLiteralExpr(LiteralExpr *lit) {
@@ -3078,7 +3057,7 @@ void CodegenVisitor::visitArrayExpr(ArrayExpr *expr) {
         if (i < 100 && valExpr->linePos() != -1)
             _fs->AddLineInfos(valExpr->linePos(), false);
 #endif
-        valExpr->visit(*this);
+        valExpr->visit(this);
         SQInteger val = _fs->PopTarget();
         SQInteger array = _fs->TopTarget();
         _fs->AddInstruction(_OP_APPENDARRAY, array, val, AAT_STACK);
@@ -3086,7 +3065,7 @@ void CodegenVisitor::visitArrayExpr(ArrayExpr *expr) {
 }
 
 void CodegenVisitor::emitUnaryOp(SQOpcode op, Expr *arg) {
-    arg->visit(*this);
+    arg->visit(this);
     SQInteger src = _fs->PopTarget();
     _fs->AddInstruction(op, _fs->PushTarget(), src);
 }
@@ -3129,7 +3108,7 @@ void CodegenVisitor::visitUnExpr(UnExpr *unary) {
     case TO_TYPEOF: emitUnaryOp(_OP_TYPEOF, unary->argument()); break;
     case TO_RESUME: emitUnaryOp(_OP_RESUME, unary->argument()); break;
     case TO_CLONE: emitUnaryOp(_OP_CLONE, unary->argument()); break;
-    case TO_PAREN: unary->argument()->visit(*this); break;
+    case TO_PAREN: unary->argument()->visit(this); break;
     case TO_DELETE: emitDelete(unary->argument());
         break;
     default:
@@ -3138,16 +3117,16 @@ void CodegenVisitor::visitUnExpr(UnExpr *unary) {
 }
 
 void CodegenVisitor::emitSimpleBin(SQOpcode op, Expr *lhs, Expr *rhs, SQInteger op3) {
-    lhs->visit(*this);
-    rhs->visit(*this);
+    lhs->visit(this);
+    rhs->visit(this);
     SQInteger op1 = _fs->PopTarget();
     SQInteger op2 = _fs->PopTarget();
     _fs->AddInstruction(op, _fs->PushTarget(), op1, op2, op3);
 }
 
 void CodegenVisitor::emitJpmArith(SQOpcode op, Expr *lhs, Expr *rhs) {
-    lhs->visit(*this);
-    rhs->visit(*this);
+    lhs->visit(this);
+    rhs->visit(this);
 
     SQInteger first_exp = _fs->PopTarget();
     SQInteger trg = _fs->PushTarget();
@@ -3167,7 +3146,7 @@ void CodegenVisitor::emitCompoundArith(SQOpcode op, SQInteger opcode, Expr *lval
 
     visitNoGet(lvalue);
 
-    rvalue->visit(*this);
+    rvalue->visit(this);
 
     if (lvalue->op() == TO_ID) {
         Id *id = lvalue->asId();
@@ -3251,7 +3230,7 @@ void CodegenVisitor::emitNewSlot(Expr *lvalue, Expr *rvalue) {
 
     visitNoGet(lvalue);
 
-    rvalue->visit(*this);
+    rvalue->visit(this);
 
     if (lvalue->isAccessExpr()) { // d.f || d["f"]
         SQInteger val = _fs->PopTarget();
@@ -3279,7 +3258,7 @@ void CodegenVisitor::emitAssign(Expr *lvalue, Expr * rvalue, bool inExpr) {
 
     visitNoGet(lvalue);
 
-    rvalue->visit(*this);
+    rvalue->visit(this);
 
     if (lvalue->op() == TO_ID) {
         Id *id = lvalue->asId();
@@ -3297,14 +3276,14 @@ void CodegenVisitor::emitAssign(Expr *lvalue, Expr * rvalue, bool inExpr) {
             emitFieldAssign(false);
         }
         else {
-            // TODO: error
+            error(_SC("can't assign to expression"));
         }
     }
     else if (lvalue->isAccessExpr()) {
         emitFieldAssign(canBeLiteral(lvalue->asAccessExpr()));
     }
     else {
-        // TODO: error
+        error(_SC("can't assign to expression"));
     }
 }
 
@@ -3342,8 +3321,10 @@ bool CodegenVisitor::CanBeDefaultDelegate(const SQChar *key)
 }
 
 void CodegenVisitor::visitGetFieldExpr(GetFieldExpr *expr) {
+    // TODO: support contant/enum load like Foo.bar.qux.v
+
     maybeAddInExprLine(expr);
-    expr->receiver()->visit(*this);
+    expr->receiver()->visit(this);
 
     SQObject nameObj = _fs->CreateString(expr->fieldName());
     SQInteger constantI = _fs->GetConstant(nameObj);
@@ -3376,8 +3357,8 @@ void CodegenVisitor::visitGetFieldExpr(GetFieldExpr *expr) {
 
 void CodegenVisitor::visitGetTableExpr(GetTableExpr *expr) {
     maybeAddInExprLine(expr);
-    expr->receiver()->visit(*this);
-    expr->key()->visit(*this);
+    expr->receiver()->visit(this);
+    expr->key()->visit(this);
 
     // TODO: wtf base?
     if (expr->receiver()->op() == TO_BASE) {
@@ -3432,19 +3413,19 @@ void CodegenVisitor::visitTerExpr(TerExpr *expr) {
     maybeAddInExprLine(expr);
     assert(expr->op() == TO_TERNARY);
 
-    expr->a()->visit(*this);
+    expr->a()->visit(this);
     _fs->AddInstruction(_OP_JZ, _fs->PopTarget());
     SQInteger jzpos = _fs->GetCurrentPos();
 
     SQInteger trg = _fs->PushTarget();
-    expr->b()->visit(*this);
+    expr->b()->visit(this);
     SQInteger first_exp = _fs->PopTarget();
     if (trg != first_exp) _fs->AddInstruction(_OP_MOVE, trg, first_exp);
     SQInteger endfirstexp = _fs->GetCurrentPos();
     _fs->AddInstruction(_OP_JMP, 0, 0);
     SQInteger jmppos = _fs->GetCurrentPos();
 
-    expr->c()->visit(*this);
+    expr->c()->visit(this);
     SQInteger second_exp = _fs->PopTarget();
     if (trg != second_exp) _fs->AddInstruction(_OP_MOVE, trg, second_exp);
 
@@ -3534,7 +3515,7 @@ bool CodegenVisitor::IsGlobalConstant(const SQObject &name, SQObject &e)
 void CodegenVisitor::visitCommaExpr(CommaExpr *expr) {
     auto expressions = expr->expressions();
     for (int i = 0; i < expressions.size(); ++i) {
-        expressions[i]->visit(*this);
+        expressions[i]->visit(this);
     }
 }
 
@@ -3627,7 +3608,7 @@ void CodegenVisitor::visitId(Id *id) {
 void CodegenVisitor::visitNoGet(Node *n) {
     bool old_dng = _donot_get;
     _donot_get = true;
-    n->visit(*this);
+    n->visit(this);
     _donot_get = old_dng;
 }
 
